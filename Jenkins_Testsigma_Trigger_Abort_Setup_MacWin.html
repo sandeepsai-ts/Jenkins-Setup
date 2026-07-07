@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jenkins → Testsigma Trigger &amp; Abort — Step by Step</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px; line-height: 1.65; color: #2f2f2f; background: #f4f6f9; }
+  @media print { body { background: #fff; } .no-print { display: none; } }
+  .wrapper { max-width: 960px; margin: 0 auto; background: #fff; box-shadow: 0 2px 24px rgba(0,0,0,0.10); }
+  .cover { background: #1F3864; padding: 52px 52px 44px 52px; border-left: 6px solid #2E9E5B; }
+  .cover-tag { font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: #6FE3A0; margin-bottom: 12px; }
+  .cover-title { font-size: 28px; font-weight: 700; color: #fff; line-height: 1.25; margin-bottom: 8px; }
+  .cover-sub { font-size: 15px; color: #BDD7EE; margin-bottom: 10px; }
+  .content { padding: 44px 52px; }
+  .part-head { font-size: 19px; font-weight: 700; color: #1F3864; padding-bottom: 8px; border-bottom: 2px solid #2E75B6; margin: 44px 0 20px 0; }
+  .part-head:first-child { margin-top: 0; }
+  p { margin-bottom: 12px; }
+  strong { font-weight: 700; }
+  code { background: #EFF3F8; border: 1px solid #DDEAF5; border-radius: 3px; padding: 1px 5px; font-family: 'SFMono-Regular', Consolas, Menlo, monospace; font-size: 12.5px; color: #C00000; }
+  .step {
+    display: grid;
+    grid-template-columns: 34px 1fr;
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .step-num {
+    width: 30px; height: 30px;
+    background: #1F3864; color: #6FE3A0;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; font-weight: 700;
+    flex-shrink: 0;
+  }
+  .step-body { padding-top: 3px; }
+  .step-body p { margin-bottom: 8px; }
+  .checkmark {
+    background: #F0F7EE;
+    border: 1px solid #C6DFBA;
+    border-left: 3px solid #375623;
+    border-radius: 4px;
+    padding: 10px 14px;
+    margin: 8px 0 4px 0;
+    font-size: 13px;
+  }
+  .checkmark strong { color: #375623; }
+  .callout { border-radius: 4px; padding: 14px 18px; margin: 18px 0; border-left: 4px solid; font-size: 13.5px; line-height: 1.6; }
+  .callout-blue  { background: #D6E4F0; border-color: #2E75B6; }
+  .callout-amber { background: #FFF2CC; border-color: #F0B30A; }
+  .callout-red   { background: #FCE4D6; border-color: #C00000; }
+  .callout-green { background: #E7F3EA; border-color: #2E9E5B; }
+  .callout strong { color: inherit; }
+  .callout-blue strong  { color: #1F3864; }
+  .callout-amber strong { color: #7B5800; }
+  .callout-red strong   { color: #C00000; }
+  .callout-green strong { color: #1E6B3E; }
+  .data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin: 14px 0 22px 0; }
+  .data-table th { background: #1F3864; color: #fff; font-weight: 700; padding: 9px 12px; text-align: left; font-size: 11.5px; letter-spacing: 0.3px; }
+  .data-table td { padding: 8px 12px; border-bottom: 1px solid #DDEAF5; vertical-align: top; }
+  .data-table tr:nth-child(even) td { background: #F5F8FC; }
+  pre { background: #1F2430; color: #E8ECF1; border-radius: 6px; padding: 16px 18px; overflow-x: auto; max-width: 100%; font-family: 'SFMono-Regular', Consolas, Menlo, monospace; font-size: 11.5px; line-height: 1.55; margin: 0; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
+  pre .c { color: #7FA6D6; } pre .k { color: #C792EA; } pre .s { color: #A5D6A7; } pre .fn { color: #82AAFF; }
+
+  .code-wrap { position: relative; margin: 10px 0 16px 0; }
+  .copy-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: #2E3B52;
+    color: #BDD7EE;
+    border: 1px solid #3E4E6B;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    transition: background 0.15s, color 0.15s;
+    z-index: 2;
+  }
+  .copy-btn:hover { background: #3E4E6B; color: #fff; }
+  .copy-btn:active { transform: scale(0.97); }
+  .copy-btn.copied { background: #2E9E5B; color: #fff; border-color: #2E9E5B; }
+  .copy-btn svg { width: 12px; height: 12px; flex-shrink: 0; }
+  .code-label { font-size: 11px; color: #7F7F7F; text-transform: uppercase; letter-spacing: 0.5px; margin: 10px 0 -4px 0; }
+  hr.section-rule { border: none; border-top: 1px solid #DDEAF5; margin: 30px 0; }
+  .doc-footer { background: #F5F8FC; border-top: 2px solid #DDEAF5; padding: 18px 52px; display: flex; justify-content: space-between; align-items: center; font-size: 11.5px; color: #7F7F7F; }
+  .toc { background: #F5F8FC; border: 1px solid #DDEAF5; border-radius: 6px; padding: 18px 22px; margin: 0 0 6px 0; }
+  .toc-title { font-size: 12px; font-weight: 700; color: #1F3864; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+  .toc ol { padding-left: 18px; margin: 0; }
+  .toc li { font-size: 13px; margin-bottom: 6px; }
+  .toc a { color: #2E75B6; text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+
+  /* ── OS tab switcher ───────────────────────────────────────── */
+  .os-toggle {
+    position: sticky; top: 0; z-index: 20;
+    background: #fff; border-bottom: 2px solid #DDEAF5;
+    padding: 14px 52px; display: flex; align-items: center; gap: 10px;
+  }
+  .os-toggle-label { font-size: 11px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: #7F7F7F; margin-right: 4px; }
+  .os-btn {
+    border: 1px solid #DDEAF5; background: #F5F8FC; color: #1F3864;
+    font-family: inherit; font-size: 13px; font-weight: 600;
+    padding: 8px 20px; border-radius: 20px; cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .os-btn:hover { border-color: #2E75B6; }
+  body.mode-mac #osBtnMac, body.mode-win #osBtnWin {
+    background: #1F3864; color: #fff; border-color: #1F3864;
+  }
+  .os-pill { display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: 0.4px; text-transform: uppercase; padding: 2px 8px; border-radius: 3px; margin-left: 6px; vertical-align: middle; }
+  .os-pill-mac { background: #D6E4F0; color: #1F3864; }
+  .os-pill-win { background: #E4D6F0; color: #4B1F86; }
+
+  /* Hide the branch that doesn't match the active tab */
+  body.mode-mac .win-only { display: none !important; }
+  body.mode-win .mac-only { display: none !important; }
+
+  .custom-flag {
+    display: inline-flex; align-items: center; gap: 5px;
+    background: #FFF2CC; color: #7B5800; border: 1px solid #F0B30A;
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.3px; text-transform: uppercase;
+    padding: 2px 9px; border-radius: 3px; margin-bottom: 8px;
+  }
+</style>
+</head>
+<body class="mode-mac">
+<div class="wrapper">
+
+  <div class="cover">
+    <div class="cover-tag">Step-by-Step Guide — No Prior Experience Needed</div>
+    <div class="cover-title">Jenkins → Testsigma Trigger &amp; Abort</div>
+    <div class="cover-sub">Every step tells you exactly what to type or click, and what to expect before moving on.</div>
+    <div class="cover-sub">Covers both Mac and Windows — use the toggle at the top of the guide to switch tracks.</div>
+  </div>
+
+  <div class="os-toggle no-print">
+    <span class="os-toggle-label">I'm setting this up on:</span>
+    <button class="os-btn" id="osBtnMac" type="button">🍎 Mac</button>
+    <button class="os-btn" id="osBtnWin" type="button">🪟 Windows</button>
+  </div>
+
+  <div class="content">
+
+    <div class="toc">
+      <div class="toc-title">Contents</div>
+      <ol>
+        <li><a href="#before">Before you start</a></li>
+        <li><a href="#p1">Part 1 — Install Jenkins</a></li>
+        <li><a href="#p2">Part 2 — Log in for the first time</a></li>
+        <li><a href="#p3">Part 3 — One thing to know first</a></li>
+        <li><a href="#p4">Part 4 — Get two things from Testsigma</a></li>
+        <li><a href="#p5">Part 5 — Create the scripts folder</a></li>
+        <li><a href="#p6">Part 6 — Store credentials in Jenkins</a></li>
+        <li><a href="#p7">Part 7 — Create the Jenkins job</a></li>
+        <li><a href="#p8">Part 8 — Run it for the first time</a></li>
+        <li><a href="#p9">Part 9 — Test the abort button</a></li>
+        <li><a href="#p10">Part 10 — Troubleshooting</a></li>
+        <li><a href="#ref">Reference — Why this works</a></li>
+      </ol>
+    </div>
+
+    <h2 class="part-head" id="before">Before You Start</h2>
+    <p>You need: a Mac or Windows machine with admin access, a Testsigma account with at least one Test Plan already set up, and 30–45 uninterrupted minutes. You do <strong>not</strong> need to already know Groovy, Jenkins, or shell/PowerShell scripting — just follow the steps in order for whichever OS you're on (use the toggle above).</p>
+    <p>This builds a job that runs automatically every night, starts a Testsigma test, watches it until it finishes, and — if you ever hit Abort in Jenkins — tells Testsigma to stop too, so it doesn't keep running (and using up your test license) in the background.</p>
+    <div class="callout callout-blue">
+      <strong>Nothing in these scripts or in the Jenkinsfile is tied to one person's machine.</strong> Every path is built from environment variables that Jenkins fills in automatically (<code>$(whoami)</code> / <code>$env:USERNAME</code>, <code>env.HOME</code> / <code>env.USERPROFILE</code>, <code>env.JOB_NAME</code>), so this guide works as-is on any Mac or Windows agent. Anywhere you'd normally have to hunt down and edit a hardcoded value, you'll instead see a <span class="custom-flag">🔧 Customizable</span> flag telling you exactly what it is and where it lives.
+    </div>
+
+    <!-- PART 1 -->
+    <h2 class="part-head" id="p1">Part 1 — Install Jenkins</h2>
+
+    <div class="mac-only">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><p>Open the <strong>Terminal</strong> app (Spotlight search → type <code>Terminal</code> → Enter).</p></div></div>
+
+    <div class="step"><div class="step-num">2</div><div class="step-body">
+      <p>Check if Homebrew is already installed:</p>
+      <pre><span class="fn">brew</span> -v</pre>
+      <p>✅ Version number like <code>Homebrew 4.x.x</code> → skip to Step 4. ❌ <code>command not found</code> → continue to Step 3.</p>
+    </div></div>
+
+    <div class="step"><div class="step-num">3</div><div class="step-body"><p>Install Homebrew (only if Step 2 said "command not found"): go to <code>https://brew.sh</code>, copy the install command shown there into Terminal, press Enter, follow the prompts (it will ask for your Mac password — normal).</p></div></div>
+
+    <div class="step"><div class="step-num">4</div><div class="step-body">
+      <p>Install Jenkins:</p>
+      <pre><span class="fn">brew</span> install jenkins-lts</pre>
+      <p>Wait for it to finish — a few minutes the first time.</p>
+    </div></div>
+
+    <div class="step"><div class="step-num">5</div><div class="step-body">
+      <p>Start Jenkins:</p>
+      <pre><span class="fn">brew</span> services start jenkins-lts</pre>
+      <div class="checkmark">✅ You should see: <code>Successfully started \`jenkins-lts\`</code></div>
+    </div></div>
+
+    <div class="step"><div class="step-num">6</div><div class="step-body">
+      <p>Confirm it's running:</p>
+      <pre><span class="fn">brew</span> services list | grep jenkins</pre>
+      <div class="checkmark">✅ <code>jenkins-lts</code> should show <code>started</code>.</div>
+    </div></div>
+    </div><!-- /mac-only P1 -->
+
+    <div class="win-only">
+    <div class="step"><div class="step-num">1</div><div class="step-body"><p>In a browser, go to <code>https://www.jenkins.io/download/</code> and, under the Windows section, download the current <strong>LTS</strong> Windows installer (<code>.msi</code>).</p></div></div>
+
+    <div class="step"><div class="step-num">2</div><div class="step-body">
+      <p>Run the downloaded <code>.msi</code>. Click through the setup wizard: <strong>Next</strong> → choose the install folder (default <code>C:\Program Files\Jenkins</code> — note this path, you'll need it in Part 2) → <strong>Next</strong>.</p>
+    </div></div>
+
+    <div class="step"><div class="step-num">3</div><div class="step-body">
+      <p>On the service-account screen, leave <strong>Run service as LocalSystem</strong> selected unless your organization requires a dedicated domain service account. Click <strong>Next</strong>.</p>
+    </div></div>
+
+    <div class="step"><div class="step-num">4</div><div class="step-body">
+      <p>Confirm the port (default <code>8080</code>) with <strong>Test Port</strong>, then click <strong>Next</strong>. Confirm the auto-detected Java location, then click <strong>Install</strong> → <strong>Finish</strong>.</p>
+      <div class="checkmark">✅ Jenkins installs itself as a Windows service and starts automatically — there's no separate "start Jenkins" command on Windows.</div>
+    </div></div>
+
+    <div class="step"><div class="step-num">5</div><div class="step-body">
+      <p>Confirm it's running: press <strong>Win + R</strong>, type <code>services.msc</code>, Enter, find <strong>Jenkins</strong> in the list.</p>
+      <div class="checkmark">✅ Status column should show <strong>Running</strong>.</div>
+    </div></div>
+    </div><!-- /win-only P1 -->
+
+    <!-- PART 2 -->
+    <h2 class="part-head" id="p2">Part 2 — Log Into Jenkins for the First Time</h2>
+
+    <div class="step"><div class="step-num">7</div><div class="step-body">
+      <p>Open your browser and go to <code>http://localhost:8080</code>.</p>
+      <div class="checkmark">✅ A page titled <strong>"Unlock Jenkins"</strong> should appear.</div>
+    </div></div>
+
+    <div class="mac-only">
+    <div class="step"><div class="step-num">8</div><div class="step-body">
+      <p>Back in Terminal, run:</p>
+      <pre><span class="fn">cat</span> /Users/$(whoami)/.jenkins/secrets/initialAdminPassword</pre>
+      <p>Copy the long string it prints. This uses <code>$(whoami)</code> to fill in your username automatically — nothing to edit.</p>
+    </div></div>
+    </div>
+
+    <div class="win-only">
+    <div class="step"><div class="step-num">8</div><div class="step-body">
+      <p>Open <strong>PowerShell</strong> and run:</p>
+      <pre><span class="fn">Get-Content</span> "C:\Program Files\Jenkins\secrets\initialAdminPassword"</pre>
+      <p>Copy the long string it prints.</p>
+      <div class="callout callout-amber"><strong>If you installed to a custom folder in Part 1, Step 2</strong> — swap <code>C:\Program Files\Jenkins</code> for that folder instead. This is the one Windows path that depends on a choice you made during install, since Jenkins itself doesn't expose it as an environment variable.</div>
+    </div></div>
+    </div>
+
+    <div class="step"><div class="step-num">9</div><div class="step-body"><p>Paste that string into <strong>Administrator password</strong> → click <strong>Continue</strong>.</p></div></div>
+    <div class="step"><div class="step-num">10</div><div class="step-body"><p>On "Customize Jenkins", click <strong>Install suggested plugins</strong>. Wait for the progress bars to finish.</p></div></div>
+    <div class="step"><div class="step-num">11</div><div class="step-body"><p>Fill in the <strong>Create First Admin User</strong> form → <strong>Save and Finish</strong>.</p></div></div>
+    <div class="step"><div class="step-num">12</div><div class="step-body">
+      <p>Click <strong>Start using Jenkins</strong>.</p>
+      <div class="checkmark">✅ You should now see the Jenkins Dashboard.</div>
+    </div></div>
+
+    <!-- PART 3 -->
+    <h2 class="part-head" id="p3">Part 3 — One Thing to Know Before Continuing</h2>
+    <div class="callout callout-amber">
+      Jenkins has an official Testsigma plugin. <strong>This guide does not use it, on purpose</strong> — it has an unresolved security issue (Jenkins Security Advisory 2025-07-09, <strong>CVE-2025-53661</strong>: it doesn't hide your Testsigma API key properly) and hasn't been updated since 2022. This setup uses plain scripts (shell on Mac, PowerShell on Windows) and Jenkins' built-in Pipeline feature instead — nothing Testsigma-specific to install here, on either OS.
+    </div>
+
+    <!-- PART 4 -->
+    <h2 class="part-head" id="p4">Part 4 — Get Two Things From Testsigma</h2>
+    <p>This part is identical on Mac and Windows — it's all done in the browser against Testsigma's site.</p>
+    <div class="step"><div class="step-num">13</div><div class="step-body"><p>Log into your Testsigma account in the browser (<code>app.testsigma.com</code>).</p></div></div>
+    <div class="step"><div class="step-num">14</div><div class="step-body"><p>Get your API key: <strong>Settings → API Keys</strong>. Create one if needed and copy it somewhere safe.</p></div></div>
+    <div class="step"><div class="step-num">15</div><div class="step-body"><p>Get your Test Plan's ID: <strong>Test Plans → (your plan) → CI/CD Integration tab</strong>. The number next to <code>"executionId"</code> in the example curl command is what you need (e.g. <code>581</code>).</p></div></div>
+
+    <!-- PART 5 -->
+    <h2 class="part-head" id="p5">Part 5 — Create the Scripts Folder</h2>
+    <p>This job calls two small helper scripts. Create a folder and paste in the code.</p>
+
+    <div class="mac-only">
+    <div class="step"><div class="step-num">16</div><div class="step-body">
+      <p>Create the folder:</p>
+      <pre><span class="fn">mkdir</span> -p /Users/$(whoami)/jenkins-ts-scripts</pre>
+    </div></div>
+
+    <div class="step"><div class="step-num">17</div><div class="step-body">
+      <p>Open a plain text editor (TextEdit → Format → Make Plain Text). Paste the following exactly, save as <code>trigger-run.sh</code> inside the folder from Step 16:</p>
+      <pre><span class="c">#!/bin/bash
+# -------------------------------------------------------------
+# trigger-run.sh
+# Triggers a Testsigma execution and saves the Run ID to a
+# fixed path in /tmp so the Jenkins abort hook can always find
+# it regardless of workspace state.
+#
+# Required environment variables (injected by Jenkins):
+#   TS_API_TOKEN  -- Testsigma API key (from Jenkins Credential TS_API_KEY)
+#   TS_PLAN_ID    -- Execution ID from Testsigma CI/CD Integrations tab (from Jenkins Credential TS_PLAN_ID)
+#   APP_VERSION   -- passed as buildNo for traceability in Testsigma UI
+#   RUN_ID_FILE   -- fixed path set in the Jenkinsfile environment block
+# -------------------------------------------------------------</span>
+
+<span class="k">set</span> -euo pipefail
+
+<span class="k">if</span> [[ -z <span class="s">"${TS_PLAN_ID:-}"</span> || -z <span class="s">"${TS_API_TOKEN:-}"</span> ]]; <span class="k">then</span>
+  <span class="fn">echo</span> <span class="s">"[ERROR] TS_PLAN_ID and TS_API_TOKEN must be set."</span>
+  <span class="k">exit</span> 1
+<span class="k">fi</span>
+
+<span class="fn">echo</span> <span class="s">"[INFO] Triggering plan ID: ${TS_PLAN_ID} | Version: ${APP_VERSION:-unset}"</span>
+
+TMPFILE=$(<span class="fn">mktemp</span>)
+HTTP_CODE=$(<span class="fn">curl</span> -s -o <span class="s">"$TMPFILE"</span> -w <span class="s">"%{http_code}"</span> \
+  -X POST \
+  -H <span class="s">"Content-Type: application/json"</span> \
+  -H <span class="s">"Accept: application/json"</span> \
+  -H <span class="s">"Authorization: Bearer ${TS_API_TOKEN}"</span> \
+  <span class="s">"https://app.testsigma.com/api/v1/execution_results"</span> \
+  -d <span class="s">"{\"executionId\": \"${TS_PLAN_ID}\", \"buildNo\": \"${APP_VERSION:-manual}\"}"</span>)
+
+BODY=$(<span class="fn">cat</span> <span class="s">"$TMPFILE"</span>)
+<span class="fn">rm</span> -f <span class="s">"$TMPFILE"</span>
+
+<span class="k">if</span> [[ <span class="s">"$HTTP_CODE"</span> != <span class="s">"200"</span> &amp;&amp; <span class="s">"$HTTP_CODE"</span> != <span class="s">"201"</span> ]]; <span class="k">then</span>
+  <span class="fn">echo</span> <span class="s">"[ERROR] Testsigma returned HTTP ${HTTP_CODE}"</span>
+  <span class="fn">echo</span> <span class="s">"$BODY"</span>
+  <span class="k">exit</span> 1
+<span class="k">fi</span>
+
+RUN_ID=$(<span class="fn">echo</span> <span class="s">"$BODY"</span> | python3 -c <span class="s">"import sys,json; print(json.load(sys.stdin)['id'])"</span>)
+
+<span class="k">if</span> [[ -z <span class="s">"$RUN_ID"</span> || <span class="s">"$RUN_ID"</span> == <span class="s">"null"</span> ]]; <span class="k">then</span>
+  <span class="fn">echo</span> <span class="s">"[ERROR] Could not read Run ID from response."</span>
+  <span class="fn">echo</span> <span class="s">"$BODY"</span>
+  <span class="k">exit</span> 1
+<span class="k">fi</span>
+
+<span class="c"># Write to the fixed path declared in the Jenkinsfile -- survives
+# workspace cleanup and Jenkins abort. The fallback below only
+# applies if you run this script manually, outside Jenkins.</span>
+<span class="fn">echo</span> <span class="s">"$RUN_ID"</span> &gt; <span class="s">"${RUN_ID_FILE:-/tmp/ts_run_id_manual-run}"</span>
+<span class="fn">echo</span> <span class="s">"[OK] Execution started. Run ID: ${RUN_ID}"</span>
+<span class="fn">echo</span> <span class="s">"[INFO] Run ID saved to: ${RUN_ID_FILE:-/tmp/ts_run_id_manual-run}"</span></pre>
+    </div></div>
+
+    <div class="step"><div class="step-num">18</div><div class="step-body">
+      <p>Repeat for a second file, <code>poll-status.sh</code>, same folder:</p>
+      <pre><span class="c">#!/bin/bash
+# -------------------------------------------------------------
+# poll-status.sh
+# Polls Testsigma every 30 seconds until the run completes,
+# times out, or is interrupted by a Jenkins abort.
+#
+# Required environment variables (injected by Jenkins):
+#   TS_API_TOKEN      -- Testsigma API key
+#   MAX_WAIT_MINUTES  -- timeout in minutes (set per plan in Jenkinsfile)
+#   RUN_ID_FILE       -- fixed path set in the Jenkinsfile environment block
+# -------------------------------------------------------------</span>
+
+<span class="k">set</span> -euo pipefail
+
+RUN_ID_FILE=<span class="s">"${RUN_ID_FILE:-/tmp/ts_run_id_manual-run}"</span>
+
+<span class="k">if</span> [[ -z <span class="s">"${TS_API_TOKEN:-}"</span> ]]; <span class="k">then</span>
+  <span class="fn">echo</span> <span class="s">"[ERROR] TS_API_TOKEN is not set."</span>
+  <span class="k">exit</span> 1
+<span class="k">fi</span>
+
+<span class="k">if</span> [[ ! -f <span class="s">"$RUN_ID_FILE"</span> ]]; <span class="k">then</span>
+  <span class="fn">echo</span> <span class="s">"[ERROR] Run ID file not found at ${RUN_ID_FILE}."</span>
+  <span class="fn">echo</span> <span class="s">"[ERROR] Did trigger-run.sh complete successfully?"</span>
+  <span class="k">exit</span> 1
+<span class="k">fi</span>
+
+RUN_ID=$(<span class="fn">cat</span> <span class="s">"$RUN_ID_FILE"</span>)
+MAX_WAIT=<span class="s">"${MAX_WAIT_MINUTES:-30}"</span>
+POLL_INTERVAL=30
+MAX_SECONDS=$(( MAX_WAIT * 60 ))
+ELAPSED=0
+
+<span class="fn">echo</span> <span class="s">"[INFO] Polling Testsigma for Run ID: ${RUN_ID}"</span>
+
+<span class="k">while</span> true; <span class="k">do</span>
+  <span class="k">if</span> (( ELAPSED &gt;= MAX_SECONDS )); <span class="k">then</span>
+    <span class="fn">echo</span> <span class="s">"[TIMEOUT] Marking Jenkins build as FAILED."</span>
+    <span class="k">exit</span> 1
+  <span class="k">fi</span>
+
+  TMPFILE=$(<span class="fn">mktemp</span>)
+  HTTP_CODE=$(<span class="fn">curl</span> -s -o <span class="s">"$TMPFILE"</span> -w <span class="s">"%{http_code}"</span> \
+    -X GET \
+    -H <span class="s">"Authorization: Bearer ${TS_API_TOKEN}"</span> \
+    -H <span class="s">"Accept: application/json"</span> \
+    <span class="s">"https://app.testsigma.com/api/v1/execution_results/${RUN_ID}"</span>)
+
+  BODY=$(<span class="fn">cat</span> <span class="s">"$TMPFILE"</span>); <span class="fn">rm</span> -f <span class="s">"$TMPFILE"</span>
+
+  <span class="k">if</span> [[ <span class="s">"$HTTP_CODE"</span> != <span class="s">"200"</span> ]]; <span class="k">then</span>
+    <span class="fn">sleep</span> <span class="s">"$POLL_INTERVAL"</span>; ELAPSED=$(( ELAPSED + POLL_INTERVAL )); <span class="k">continue</span>
+  <span class="k">fi</span>
+
+  RESULT=$(<span class="fn">echo</span> <span class="s">"$BODY"</span> | python3 -c <span class="s">"import sys,json; print(json.load(sys.stdin).get('result','UNKNOWN'))"</span>)
+  STATUS=$(<span class="fn">echo</span> <span class="s">"$BODY"</span> | python3 -c <span class="s">"import sys,json; print(json.load(sys.stdin).get('status','UNKNOWN'))"</span>)
+
+  <span class="fn">echo</span> <span class="s">"Run ID: ${RUN_ID} | result: ${RESULT} | status: ${STATUS}"</span>
+
+  <span class="k">case</span> <span class="s">"$RESULT"</span> <span class="k">in</span>
+    PASSED)          <span class="fn">echo</span> <span class="s">"[SUCCESS] PASSED."</span>;             <span class="k">exit</span> 0 ;;
+    FAILURE|FAILED)  <span class="fn">echo</span> <span class="s">"[FAILED] Run FAILED."</span>;        <span class="k">exit</span> 1 ;;
+    STOPPED|ABORTED) <span class="fn">echo</span> <span class="s">"[STOPPED] Run stopped/aborted."</span>; <span class="k">exit</span> 1 ;;
+    *)               <span class="fn">sleep</span> <span class="s">"$POLL_INTERVAL"</span>; ELAPSED=$(( ELAPSED + POLL_INTERVAL )) ;;
+  <span class="k">esac</span>
+<span class="k">done</span></pre>
+    </div></div>
+
+    <div class="step"><div class="step-num">19</div><div class="step-body">
+      <p>Back in Terminal, make both scripts runnable:</p>
+      <pre><span class="fn">chmod</span> +x /Users/$(whoami)/jenkins-ts-scripts/trigger-run.sh
+<span class="fn">chmod</span> +x /Users/$(whoami)/jenkins-ts-scripts/poll-status.sh</pre>
+    </div></div>
+
+    <div class="step"><div class="step-num">20</div><div class="step-body">
+      <p>Double-check both are there and executable:</p>
+      <pre><span class="fn">ls</span> -la /Users/$(whoami)/jenkins-ts-scripts/</pre>
+      <div class="checkmark">✅ Both files should show <code>-rwxr-xr-x</code> at the start of the line. If it's <code>-rw-r--r--</code> (no <code>x</code>), redo Step 19.</div>
+      <div class="callout callout-amber"><strong>If Jenkins later fails with "Permission denied"</strong> — this step is why. Come back and run <code>chmod +x</code> again.</div>
+    </div></div>
+    </div><!-- /mac-only P5 -->
+
+    <div class="win-only">
+    <div class="step"><div class="step-num">16</div><div class="step-body">
+      <p>Create the folder in PowerShell:</p>
+      <pre><span class="fn">New-Item</span> -ItemType Directory -Force -Path <span class="s">"$env:USERPROFILE\jenkins-ts-scripts"</span></pre>
+      <p>This uses <code>$env:USERPROFILE</code> (Windows' equivalent of Mac's <code>$(whoami)</code> home-path trick) so it always points at your own profile folder — nothing to edit.</p>
+    </div></div>
+
+    <div class="step"><div class="step-num">17</div><div class="step-body">
+      <p>Open a plain text editor (Notepad is fine). Paste the following exactly, save as <code>trigger-run.ps1</code> — <strong>not</strong> <code>.txt</code> — inside the folder from Step 16:</p>
+      <pre><span class="c"># -------------------------------------------------------------
+# trigger-run.ps1
+# Triggers a Testsigma execution and saves the Run ID to a fixed
+# path so the Jenkins abort hook can always find it regardless
+# of workspace state.
+#
+# Required environment variables (injected by Jenkins):
+#   TS_API_TOKEN  - Testsigma API key (from Jenkins Credential TS_API_KEY)
+#   TS_PLAN_ID    - Execution ID from Testsigma CI/CD Integrations tab (from Jenkins Credential TS_PLAN_ID)
+#   APP_VERSION   - passed as buildNo for traceability in Testsigma UI
+#   RUN_ID_FILE   - fixed path set in the Jenkinsfile environment block
+# -------------------------------------------------------------</span>
+
+$ErrorActionPreference = <span class="s">"Stop"</span>
+
+<span class="k">if</span> ([string]::IsNullOrWhiteSpace($env:TS_PLAN_ID) -or [string]::IsNullOrWhiteSpace($env:TS_API_TOKEN)) {
+    <span class="fn">Write-Host</span> <span class="s">"[ERROR] TS_PLAN_ID and TS_API_TOKEN must be set."</span>
+    <span class="k">exit</span> 1
+}
+
+$appVersion = <span class="k">if</span> ($env:APP_VERSION) { $env:APP_VERSION } <span class="k">else</span> { <span class="s">"unset"</span> }
+<span class="fn">Write-Host</span> <span class="s">"[INFO] Triggering plan ID: $($env:TS_PLAN_ID) | Version: $appVersion"</span>
+
+$runIdFile = <span class="k">if</span> ($env:RUN_ID_FILE) { $env:RUN_ID_FILE } <span class="k">else</span> { <span class="s">"$env:TEMP\ts_run_id_manual-run.txt"</span> }
+$buildNo   = <span class="k">if</span> ($env:APP_VERSION) { $env:APP_VERSION } <span class="k">else</span> { <span class="s">"manual"</span> }
+
+<span class="k">try</span> {
+    $body = @{ executionId = $env:TS_PLAN_ID; buildNo = $buildNo } | <span class="fn">ConvertTo-Json</span>
+    $response = <span class="fn">Invoke-RestMethod</span> -Uri <span class="s">"https://app.testsigma.com/api/v1/execution_results"</span> `
+        -Method Post `
+        -Headers @{ <span class="s">"Authorization"</span> = <span class="s">"Bearer $($env:TS_API_TOKEN)"</span>; <span class="s">"Accept"</span> = <span class="s">"application/json"</span> } `
+        -ContentType <span class="s">"application/json"</span> `
+        -Body $body
+}
+<span class="k">catch</span> {
+    <span class="fn">Write-Host</span> <span class="s">"[ERROR] Testsigma request failed: $($_.Exception.Message)"</span>
+    <span class="k">if</span> ($_.ErrorDetails.Message) { <span class="fn">Write-Host</span> $_.ErrorDetails.Message }
+    <span class="k">exit</span> 1
+}
+
+$runId = $response.id
+<span class="k">if</span> ([string]::IsNullOrWhiteSpace($runId) -or $runId -eq <span class="s">"null"</span>) {
+    <span class="fn">Write-Host</span> <span class="s">"[ERROR] Could not read Run ID from response."</span>
+    <span class="fn">Write-Host</span> ($response | <span class="fn">ConvertTo-Json</span>)
+    <span class="k">exit</span> 1
+}
+
+<span class="fn">Set-Content</span> -Path $runIdFile -Value $runId -NoNewline
+<span class="fn">Write-Host</span> <span class="s">"[OK] Execution started. Run ID: $runId"</span>
+<span class="fn">Write-Host</span> <span class="s">"[INFO] Run ID saved to: $runIdFile"</span></pre>
+    </div></div>
+
+    <div class="step"><div class="step-num">18</div><div class="step-body">
+      <p>Repeat for a second file, <code>poll-status.ps1</code>, same folder:</p>
+      <pre><span class="c"># -------------------------------------------------------------
+# poll-status.ps1
+# Polls Testsigma every 30 seconds until the run completes,
+# times out, or is interrupted by a Jenkins abort.
+#
+# Required environment variables (injected by Jenkins):
+#   TS_API_TOKEN      - Testsigma API key
+#   MAX_WAIT_MINUTES  - timeout in minutes (set per plan in Jenkinsfile)
+#   RUN_ID_FILE       - fixed path set in the Jenkinsfile environment block
+# -------------------------------------------------------------</span>
+
+$ErrorActionPreference = <span class="s">"Stop"</span>
+
+$runIdFile = <span class="k">if</span> ($env:RUN_ID_FILE) { $env:RUN_ID_FILE } <span class="k">else</span> { <span class="s">"$env:TEMP\ts_run_id_manual-run.txt"</span> }
+
+<span class="k">if</span> ([string]::IsNullOrWhiteSpace($env:TS_API_TOKEN)) {
+    <span class="fn">Write-Host</span> <span class="s">"[ERROR] TS_API_TOKEN is not set."</span>
+    <span class="k">exit</span> 1
+}
+
+<span class="k">if</span> (-not (<span class="fn">Test-Path</span> $runIdFile)) {
+    <span class="fn">Write-Host</span> <span class="s">"[ERROR] Run ID file not found at $runIdFile."</span>
+    <span class="fn">Write-Host</span> <span class="s">"[ERROR] Did trigger-run.ps1 complete successfully?"</span>
+    <span class="k">exit</span> 1
+}
+
+$runId          = (<span class="fn">Get-Content</span> -Path $runIdFile -Raw).Trim()
+$maxWaitMinutes = <span class="k">if</span> ($env:MAX_WAIT_MINUTES) { [int]$env:MAX_WAIT_MINUTES } <span class="k">else</span> { 30 }
+$pollInterval   = 30
+$maxSeconds     = $maxWaitMinutes * 60
+$elapsed        = 0
+
+<span class="fn">Write-Host</span> <span class="s">"[INFO] Polling Testsigma for Run ID: $runId"</span>
+
+<span class="k">while</span> ($true) {
+    <span class="k">if</span> ($elapsed -ge $maxSeconds) {
+        <span class="fn">Write-Host</span> <span class="s">"[TIMEOUT] Marking Jenkins build as FAILED."</span>
+        <span class="k">exit</span> 1
+    }
+
+    <span class="k">try</span> {
+        $response = <span class="fn">Invoke-RestMethod</span> -Uri <span class="s">"https://app.testsigma.com/api/v1/execution_results/$runId"</span> `
+            -Method Get `
+            -Headers @{ <span class="s">"Authorization"</span> = <span class="s">"Bearer $($env:TS_API_TOKEN)"</span>; <span class="s">"Accept"</span> = <span class="s">"application/json"</span> }
+    }
+    <span class="k">catch</span> {
+        <span class="fn">Write-Host</span> <span class="s">"[WARN] Poll request failed, retrying: $($_.Exception.Message)"</span>
+        <span class="fn">Start-Sleep</span> -Seconds $pollInterval
+        $elapsed += $pollInterval
+        <span class="k">continue</span>
+    }
+
+    $result = <span class="k">if</span> ($response.result) { $response.result } <span class="k">else</span> { <span class="s">"UNKNOWN"</span> }
+    $status = <span class="k">if</span> ($response.status) { $response.status } <span class="k">else</span> { <span class="s">"UNKNOWN"</span> }
+
+    <span class="fn">Write-Host</span> <span class="s">"Run ID: $runId | result: $result | status: $status"</span>
+
+    <span class="k">switch</span> -Regex ($result) {
+        <span class="s">"PASSED"</span>          { <span class="fn">Write-Host</span> <span class="s">"[SUCCESS] PASSED."</span>;              <span class="k">exit</span> 0 }
+        <span class="s">"FAILURE|FAILED"</span>  { <span class="fn">Write-Host</span> <span class="s">"[FAILED] Run FAILED."</span>;         <span class="k">exit</span> 1 }
+        <span class="s">"STOPPED|ABORTED"</span> { <span class="fn">Write-Host</span> <span class="s">"[STOPPED] Run stopped/aborted."</span>; <span class="k">exit</span> 1 }
+        <span class="k">default</span>           { <span class="fn">Start-Sleep</span> -Seconds $pollInterval; $elapsed += $pollInterval }
+    }
+}</pre>
+    </div></div>
+
+    <div class="step"><div class="step-num">19</div><div class="step-body">
+      <p>Nothing to <code>chmod</code> on Windows — <code>.ps1</code> files don't carry an executable bit. Skip to Step 20.</p>
+    </div></div>
+
+    <div class="step"><div class="step-num">20</div><div class="step-body">
+      <p>Double-check both files landed correctly:</p>
+      <pre><span class="fn">Get-ChildItem</span> <span class="s">"$env:USERPROFILE\jenkins-ts-scripts"</span></pre>
+      <div class="checkmark">✅ <code>trigger-run.ps1</code> and <code>poll-status.ps1</code> should both be listed.</div>
+      <div class="callout callout-amber"><strong>If Jenkins later fails with "cannot be loaded because running scripts is disabled"</strong> — this is PowerShell's execution policy blocking unsigned scripts. The Jenkinsfile in Part 7 already calls PowerShell with its bypass flag, so you shouldn't hit this from Jenkins; if you do, run <code>Set-ExecutionPolicy RemoteSigned -Scope CurrentUser</code> in an elevated PowerShell prompt on the agent machine.</div>
+    </div></div>
+    </div><!-- /win-only P5 -->
+
+    <!-- PART 6 -->
+    <h2 class="part-head" id="p6">Part 6 — Store Your Testsigma Credentials in Jenkins</h2>
+    <p>Rather than typing your API key into a script file, you store it once inside Jenkins, encrypted. This part is identical on Mac and Windows.</p>
+
+    <div class="step"><div class="step-num">21</div><div class="step-body"><p>In your browser: <strong>Manage Jenkins → Credentials</strong>.</p></div></div>
+    <div class="step"><div class="step-num">22</div><div class="step-body"><p>Click <strong>(global)</strong> → <strong>Add Credentials</strong>.</p></div></div>
+    <div class="step"><div class="step-num">23</div><div class="step-body">
+      <span class="custom-flag">🔧 Customizable</span>
+      <p>Fill in for your API key: Kind <strong>Secret text</strong> · Secret: your Testsigma API key from Step 14 · ID: <code>TS_API_KEY</code> · Description: <code>Testsigma API Key</code> → <strong>Create</strong>.</p>
+      <p>The ID <code>TS_API_KEY</code> can be anything you like — it's just a label. Whatever you choose just has to match the <code>credentials('...')</code> line in the Jenkinsfile in Part 7 exactly, character for character.</p>
+    </div></div>
+    <div class="step"><div class="step-num">24</div><div class="step-body">
+      <p>Click <strong>Add Credentials</strong> again for the Plan ID: Kind <strong>Secret text</strong> · Secret: the executionId from Step 15 (e.g. <code>581</code>) · ID: <code>TS_PLAN_ID</code> · Description: <code>Testsigma Test Plan Execution ID</code> → <strong>Create</strong>.</p>
+      <div class="checkmark">✅ Two entries now in Credentials: <code>TS_API_KEY</code> and <code>TS_PLAN_ID</code>. These IDs must match exactly — the pipeline script refers to them by these names.</div>
+    </div></div>
+
+    <!-- PART 7 -->
+    <h2 class="part-head" id="p7">Part 7 — Create the Jenkins Job</h2>
+    <div class="step"><div class="step-num">25</div><div class="step-body"><p>From the Dashboard, click <strong>New Item</strong>.</p></div></div>
+    <div class="step"><div class="step-num">26</div><div class="step-body">
+      <span class="custom-flag">🔧 Customizable</span>
+      <p>Name it <code>testsigma-nightly</code> — or anything else you'd prefer (e.g. <code>regression-suite-nightly</code>). Select <strong>Pipeline</strong>. Click <strong>OK</strong>.</p>
+      <div class="callout callout-green"><strong>Renaming the job is safe by default.</strong> The Jenkinsfile below reads the job's name automatically from Jenkins' built-in <code>env.JOB_NAME</code> variable (see the <code>RUN_ID_FILE</code> line, flagged inline) rather than having it typed in anywhere, so there's no second place to update.</div>
+    </div></div>
+    <div class="step"><div class="step-num">27</div><div class="step-body"><p>Scroll down to the <strong>Pipeline</strong> section.</p></div></div>
+    <div class="step"><div class="step-num">28</div><div class="step-body"><p>Under <strong>Definition</strong>, keep <strong>Pipeline script</strong> selected.</p></div></div>
+
+    <div class="mac-only">
+    <div class="step"><div class="step-num">29</div><div class="step-body">
+      <p>Paste the entire Jenkinsfile below into the Script box:</p>
+      <pre><span class="c">// -------------------------------------------------------------
+// Jenkinsfile -- Mac agent
+// Last updated: July 2026
+//
+// Fixes applied:
+//   1. always block no longer deletes the Run ID file before the
+//      aborted block can read it -- cleanup moved to end of each
+//      post condition individually
+//   2. Replaced new java.io.File() with sh+readFile pattern to
+//      avoid Jenkins sandbox security rejection
+// -------------------------------------------------------------</span>
+<span class="k">pipeline</span> {
+  <span class="fn">agent</span> any
+  <span class="fn">triggers</span> {
+    <span class="fn">cron</span>(<span class="s">'H 2 * * *'</span>)
+  }
+  <span class="fn">environment</span> {
+    <span class="c">// [CUSTOMIZE] must match the Credential ID from Part 6, Step 23</span>
+    TS_API_TOKEN     = <span class="fn">credentials</span>(<span class="s">'TS_API_KEY'</span>)
+    TS_PLAN_ID       = <span class="fn">credentials</span>(<span class="s">'TS_PLAN_ID'</span>)
+    APP_VERSION      = <span class="s">"2.2.2.2"</span>
+    <span class="c">// env.HOME resolves to the agent's own home folder at runtime --
+    // no hardcoded username. Change only if you saved the scripts
+    // folder somewhere other than the default path from Part 5.</span>
+    SCRIPTS_DIR      = <span class="s">"${env.HOME}/jenkins-ts-scripts"</span>
+    <span class="c">// [AUTO] Derived automatically from this job's own name (env.JOB_NAME) --
+    // renaming the job in Step 26 does not require touching this line.</span>
+    RUN_ID_FILE      = <span class="s">"/tmp/ts_run_id_${env.JOB_NAME}"</span>
+    <span class="c">// -- Change this per test plan -----------------------------</span>
+    MAX_WAIT_MINUTES = <span class="s">"30"</span>
+  }
+  <span class="k">stages</span> {
+    <span class="k">stage</span>(<span class="s">'Trigger Testsigma Run'</span>) {
+      <span class="k">steps</span> { <span class="fn">sh</span> <span class="s">'"${SCRIPTS_DIR}/trigger-run.sh"'</span> }
+    }
+    <span class="k">stage</span>(<span class="s">'Wait for Results'</span>) {
+      <span class="k">steps</span> { <span class="fn">sh</span> <span class="s">'"${SCRIPTS_DIR}/poll-status.sh"'</span> }
+    }
+  }
+  <span class="k">post</span> {
+    <span class="c">// Fires ONLY when Abort is clicked in Jenkins</span>
+    <span class="k">aborted</span> {
+      <span class="k">script</span> {
+        <span class="k">def</span> runId = <span class="fn">sh</span>(
+          <span class="fn">script</span>: <span class="s">'cat "${RUN_ID_FILE}" 2&gt;/dev/null || echo ""'</span>,
+          <span class="fn">returnStdout</span>: <span class="k">true</span>
+        ).trim()
+        <span class="k">if</span> (runId) {
+          <span class="fn">echo</span> <span class="s">"[ABORT] Jenkins cancelled. Stopping Testsigma Run ID: ${runId}"</span>
+          <span class="fn">sh</span> <span class="s">"""
+            curl -s -X PUT \\
+              -H "Authorization: Bearer ${TS_API_TOKEN}" \\
+              -H "Content-Type: application/json" \\
+              -H "Accept: application/json" \\
+              "https://app.testsigma.com/api/v1/execution_results/${runId}" \\
+              -d '{"result":"STOPPED"}' || true
+          """</span>
+          <span class="fn">echo</span> <span class="s">"[ABORT] Stop signal sent. License freed."</span>
+        } <span class="k">else</span> {
+          <span class="fn">echo</span> <span class="s">"[ABORT] No Run ID found -- Testsigma may not have started. Check manually."</span>
+        }
+        <span class="fn">sh</span> <span class="s">'rm -f "${RUN_ID_FILE}" || true'</span>
+        <span class="fn">echo</span> <span class="s">"[CLEANUP] Done."</span>
+      }
+    }
+    <span class="k">failure</span> {
+      <span class="k">script</span> {
+        <span class="fn">echo</span> <span class="s">"[FAILED] Pipeline failed. Check console output above for details."</span>
+        <span class="fn">sh</span> <span class="s">'rm -f "${RUN_ID_FILE}" || true'</span>
+        <span class="fn">echo</span> <span class="s">"[CLEANUP] Done."</span>
+      }
+    }
+    <span class="k">success</span> {
+      <span class="k">script</span> {
+        <span class="fn">echo</span> <span class="s">"[SUCCESS] Testsigma run completed and passed."</span>
+        <span class="fn">sh</span> <span class="s">'rm -f "${RUN_ID_FILE}" || true'</span>
+        <span class="fn">echo</span> <span class="s">"[CLEANUP] Done."</span>
+      }
+    }
+  }
+}</pre>
+    </div></div>
+
+    <div class="step"><div class="step-num">30</div><div class="step-body">
+      <p>Click <strong>Save</strong>.</p>
+      <div class="checkmark">✅ You land on the job's main page with no build history yet. Nothing here needed a manual path edit — <code>env.HOME</code> already points at wherever <code>$(whoami)</code> resolves to on this agent.</div>
+    </div></div>
+    </div><!-- /mac-only P7 -->
+
+    <div class="win-only">
+    <div class="step"><div class="step-num">29</div><div class="step-body">
+      <p>Paste the entire Jenkinsfile below into the Script box:</p>
+      <pre><span class="c">// -------------------------------------------------------------
+// Jenkinsfile -- Windows agent
+// Last updated: July 2026
+//
+// Notes:
+//   1. Uses the built-in `powershell` pipeline step (bundled with
+//      the standard Pipeline plugin set -- already installed if you
+//      chose "Install suggested plugins" in Part 2).
+//   2. runId is passed into the PowerShell abort block via
+//      withEnv() rather than Groovy string interpolation, so the
+//      PowerShell script text can stay single-quoted and safe.
+// -------------------------------------------------------------</span>
+<span class="k">pipeline</span> {
+  <span class="fn">agent</span> any
+  <span class="fn">triggers</span> {
+    <span class="fn">cron</span>(<span class="s">'H 2 * * *'</span>)
+  }
+  <span class="fn">environment</span> {
+    <span class="c">// [CUSTOMIZE] must match the Credential ID from Part 6, Step 23</span>
+    TS_API_TOKEN     = <span class="fn">credentials</span>(<span class="s">'TS_API_KEY'</span>)
+    TS_PLAN_ID       = <span class="fn">credentials</span>(<span class="s">'TS_PLAN_ID'</span>)
+    APP_VERSION      = <span class="s">"2.2.2.2"</span>
+    <span class="c">// env.USERPROFILE resolves to the agent's own profile folder at
+    // runtime -- no hardcoded username. Change only if you saved the
+    // scripts folder somewhere other than the default path from Part 5.</span>
+    SCRIPTS_DIR      = <span class="s">"${env.USERPROFILE}\\jenkins-ts-scripts"</span>
+    <span class="c">// [AUTO] Derived automatically from this job's own name (env.JOB_NAME) --
+    // renaming the job in Step 26 does not require touching this line.</span>
+    RUN_ID_FILE      = <span class="s">"${env.TEMP}\\ts_run_id_${env.JOB_NAME}.txt"</span>
+    <span class="c">// -- Change this per test plan -----------------------------</span>
+    MAX_WAIT_MINUTES = <span class="s">"30"</span>
+  }
+  <span class="k">stages</span> {
+    <span class="k">stage</span>(<span class="s">'Trigger Testsigma Run'</span>) {
+      <span class="k">steps</span> { <span class="fn">powershell</span> <span class="s">'&amp; "$env:SCRIPTS_DIR\\trigger-run.ps1"'</span> }
+    }
+    <span class="k">stage</span>(<span class="s">'Wait for Results'</span>) {
+      <span class="k">steps</span> { <span class="fn">powershell</span> <span class="s">'&amp; "$env:SCRIPTS_DIR\\poll-status.ps1"'</span> }
+    }
+  }
+  <span class="k">post</span> {
+    <span class="c">// Fires ONLY when Abort is clicked in Jenkins</span>
+    <span class="k">aborted</span> {
+      <span class="k">script</span> {
+        <span class="k">def</span> runId = <span class="fn">powershell</span>(
+          <span class="fn">script</span>: <span class="s">'if (Test-Path $env:RUN_ID_FILE) { (Get-Content $env:RUN_ID_FILE -Raw).Trim() } else { Write-Output "" }'</span>,
+          <span class="fn">returnStdout</span>: <span class="k">true</span>
+        ).trim()
+        <span class="k">if</span> (runId) {
+          <span class="fn">echo</span> <span class="s">"[ABORT] Jenkins cancelled. Stopping Testsigma Run ID: ${runId}"</span>
+          <span class="fn">withEnv</span>([<span class="s">"TS_RUN_ID=${runId}"</span>]) {
+            <span class="fn">powershell</span> <span class="s">'''
+              try {
+                Invoke-RestMethod -Uri "https://app.testsigma.com/api/v1/execution_results/$env:TS_RUN_ID" -Method Put -Headers @{ "Authorization" = "Bearer $env:TS_API_TOKEN"; "Accept" = "application/json" } -ContentType "application/json" -Body \'{"result":"STOPPED"}\' | Out-Null
+              } catch {
+                Write-Host "[WARN] Stop request failed: $($_.Exception.Message)"
+              }
+            '''</span>
+          }
+          <span class="fn">echo</span> <span class="s">"[ABORT] Stop signal sent. License freed."</span>
+        } <span class="k">else</span> {
+          <span class="fn">echo</span> <span class="s">"[ABORT] No Run ID found -- Testsigma may not have started. Check manually."</span>
+        }
+        <span class="fn">powershell</span> <span class="s">'Remove-Item -Path $env:RUN_ID_FILE -ErrorAction SilentlyContinue'</span>
+        <span class="fn">echo</span> <span class="s">"[CLEANUP] Done."</span>
+      }
+    }
+    <span class="k">failure</span> {
+      <span class="k">script</span> {
+        <span class="fn">echo</span> <span class="s">"[FAILED] Pipeline failed. Check console output above for details."</span>
+        <span class="fn">powershell</span> <span class="s">'Remove-Item -Path $env:RUN_ID_FILE -ErrorAction SilentlyContinue'</span>
+        <span class="fn">echo</span> <span class="s">"[CLEANUP] Done."</span>
+      }
+    }
+    <span class="k">success</span> {
+      <span class="k">script</span> {
+        <span class="fn">echo</span> <span class="s">"[SUCCESS] Testsigma run completed and passed."</span>
+        <span class="fn">powershell</span> <span class="s">'Remove-Item -Path $env:RUN_ID_FILE -ErrorAction SilentlyContinue'</span>
+        <span class="fn">echo</span> <span class="s">"[CLEANUP] Done."</span>
+      }
+    }
+  }
+}</pre>
+      <div class="callout callout-amber"><strong>If Jenkins reports "powershell step not found"</strong> — install the <strong>PowerShell</strong> plugin via <strong>Manage Jenkins → Plugins</strong>. It's normally pulled in by "Install suggested plugins" in Part 2, but some minimal installs skip it.</div>
+    </div></div>
+
+    <div class="step"><div class="step-num">30</div><div class="step-body">
+      <p>Click <strong>Save</strong>.</p>
+      <div class="checkmark">✅ You land on the job's main page with no build history yet. Nothing here needed a manual path edit — <code>env.USERPROFILE</code> already points at wherever <code>$env:USERNAME</code> resolves to on this agent.</div>
+    </div></div>
+    </div><!-- /win-only P7 -->
+
+    <!-- PART 8 -->
+    <h2 class="part-head" id="p8">Part 8 — Run It for the First Time</h2>
+    <p>Console output is identical on both platforms — the Windows scripts print the same status lines as the Mac ones on purpose, so this part doesn't need a toggle.</p>
+    <div class="step"><div class="step-num">32</div><div class="step-body"><p>Click <strong>Build Now</strong> — don't wait for the scheduled nightly run.</p></div></div>
+    <div class="step"><div class="step-num">33</div><div class="step-body">
+      <p>Click the new build entry, then <strong>Console Output</strong>.</p>
+      <div class="checkmark">✅ You should see, in order:
+        <pre>[INFO] Triggering plan ID: **** | Version: 2.2.2.2
+[OK] Execution started. Run ID: &lt;number&gt;
+[INFO] Polling Testsigma for Run ID: &lt;same number&gt;
+Run ID: &lt;number&gt; | result: RUNNING | status: STATUS_CREATED</pre>
+        (<code>****</code> is Jenkins hiding your API key — correct behavior.)
+      </div>
+    </div></div>
+    <div class="step"><div class="step-num">34</div><div class="step-body"><p>Leave it running. A green build with <code>[SUCCESS] Testsigma run PASSED.</code> means everything works end-to-end. Red → see Part 10.</p></div></div>
+
+    <!-- PART 9 -->
+    <h2 class="part-head" id="p9">Part 9 — Test the Abort Button</h2>
+    <p>This is the part that's easy to get wrong from scratch, so it's worth verifying directly — same steps on both OSes.</p>
+    <div class="step"><div class="step-num">35</div><div class="step-body"><p>Trigger another build: <strong>Build Now</strong>.</p></div></div>
+    <div class="step"><div class="step-num">36</div><div class="step-body"><p>While the console shows <code>[INFO] Polling Testsigma...</code>, click the red <strong>✕</strong> to <strong>Abort</strong> it.</p></div></div>
+    <div class="step"><div class="step-num">37</div><div class="step-body">
+      <div class="checkmark">✅ Console should show:
+        <pre>[ABORT] Jenkins cancelled. Stopping Testsigma Run ID: &lt;number&gt;
+[ABORT] Stop signal sent. License freed.
+[CLEANUP] Done.</pre>
+      </div>
+    </div></div>
+    <div class="step"><div class="step-num">38</div><div class="step-body">
+      <p>Check Testsigma directly: <strong>Run Results</strong> → find that run → confirm it shows stopped, not still running.</p>
+    </div></div>
+
+    <div class="callout callout-blue">
+      <strong>Note:</strong> the Testsigma "stop a run" API call isn't officially published in their documentation — it was found by testing and confirmed to work, but Testsigma could change it without notice. If Step 38 ever stops matching (Jenkins sends the stop, Testsigma keeps running), check with Testsigma Support and stop the run manually from their UI in the meantime.
+    </div>
+
+    <!-- PART 10 -->
+    <h2 class="part-head" id="p10">Part 10 — Troubleshooting</h2>
+    <table class="data-table">
+      <thead><tr><th>What you see</th><th>What it means</th><th>What to do</th></tr></thead>
+      <tbody>
+        <tr class="mac-only"><td><code>poll-status.sh: Permission denied</code></td><td>Skipped or need to redo Step 19</td><td>Run <code>chmod +x</code> on both scripts again</td></tr>
+        <tr class="win-only"><td><code>cannot be loaded because running scripts is disabled</code></td><td>PowerShell execution policy on the agent</td><td>Run <code>Set-ExecutionPolicy RemoteSigned -Scope CurrentUser</code> in an elevated prompt on the agent</td></tr>
+        <tr><td><code>TS_PLAN_ID and TS_API_TOKEN must be set</code></td><td>Credential IDs don't match exactly</td><td>Recheck Part 6 — must be exactly <code>TS_API_KEY</code> and <code>TS_PLAN_ID</code> (or whatever you renamed them to — just make sure the Jenkinsfile's <code>credentials('...')</code> lines match)</td></tr>
+        <tr><td>Trigger fails HTTP 401/403</td><td>API key wrong or expired</td><td>Get a fresh key from Testsigma, update the credential</td></tr>
+        <tr><td>Build hangs, then <code>[TIMEOUT]</code></td><td>Test plan takes longer than 30 minutes</td><td>Raise <code>MAX_WAIT_MINUTES</code> in the Jenkinsfile</td></tr>
+        <tr><td>Abort doesn't stop Testsigma</td><td>Undocumented stop endpoint may have changed</td><td>Stop manually in Testsigma UI</td></tr>
+        <tr><td>Nightly 2 AM run never fires</td><td>Jenkins learns the schedule after first run</td><td>Click <strong>Build Now</strong> once after saving</td></tr>
+        <tr class="mac-only"><td><code>RejectedAccessException ... new java.io.File</code></td><td>Different/older Jenkinsfile than Step 29</td><td>Re-paste the Mac Jenkinsfile from Step 29 exactly</td></tr>
+        <tr class="win-only"><td><code>powershell step not found</code></td><td>PowerShell plugin missing</td><td>Install it via <strong>Manage Jenkins → Plugins</strong></td></tr>
+        <tr class="win-only"><td>Job renamed but abort stops working</td><td>Old build's Run ID file used the previous job name</td><td>Not a bug — in-flight builds from before the rename finish against the old path; new builds pick up <code>env.JOB_NAME</code> automatically</td></tr>
+      </tbody>
+    </table>
+
+    <!-- REFERENCE -->
+    <h2 class="part-head" id="ref">Reference — Why This Works the Way It Does</h2>
+    <p><strong>Why not the official Testsigma Jenkins plugin?</strong> It has an unfixed security issue (CVE-2025-53661 — doesn't hide your API key properly) and hasn't been updated since 2022. It also can't do the abort part — only trigger and wait. This applies equally to Mac and Windows installs, since it's the same plugin either way.</p>
+    <p><strong>Why separate <code>aborted</code>/<code>failure</code>/<code>success</code> cleanup instead of one shared step?</strong> Jenkins runs these in a fixed order, and a shared "always" cleanup step would run <em>before</em> the abort logic gets to read the saved Run ID — deleting the file it needs. Cleaning up at the end of each individual block avoids that race.</p>
+    <p class="mac-only"><strong>Why <code>sh(script: 'cat ...')</code> instead of reading the file directly in Groovy?</strong> Jenkins pipeline scripts run in a security sandbox that blocks raw Groovy/Java file reads unless an administrator approves each one. Routing through a shell command sidesteps this since shell commands are already allowed.</p>
+    <p class="win-only"><strong>Why <code>powershell(script: 'Get-Content ...')</code> instead of reading the file directly in Groovy?</strong> Same sandbox restriction as on Mac — raw Groovy/Java file reads need admin approval, so the read is routed through PowerShell instead, which pipeline steps are already allowed to call.</p>
+    <p class="win-only"><strong>Why pass the Run ID into the abort PowerShell block via <code>withEnv()</code> instead of Groovy string interpolation?</strong> The stop-call script is wrapped in Groovy triple-single-quotes so PowerShell's own <code>$env:</code> syntax isn't accidentally interpreted by Groovy first. That means the Run ID can't be spliced in with <code>${runId}</code> inside that block — so it's exported as an environment variable instead, which PowerShell then reads natively.</p>
+
+    <table class="data-table">
+      <thead><tr><th>Purpose</th><th>Method</th><th>Endpoint</th><th>Officially documented?</th></tr></thead>
+      <tbody>
+        <tr><td>Start a run</td><td><code>POST</code></td><td><code>/api/v1/execution_results</code></td><td>Yes</td></tr>
+        <tr><td>Check run status</td><td><code>GET</code></td><td><code>/api/v1/execution_results/{run_id}</code></td><td>Yes</td></tr>
+        <tr><td>Stop a run</td><td><code>PUT</code></td><td><code>/api/v1/execution_results/{run_id}</code> with <code>{"result":"STOPPED"}</code></td><td><strong>No</strong> — works, but undocumented</td></tr>
+      </tbody>
+    </table>
+
+    <hr class="section-rule">
+
+  </div><!-- /content -->
+
+  <div class="doc-footer">
+    <span>Jenkins + Testsigma Setup Guide &nbsp;|&nbsp; Mac &amp; Windows Edition</span>
+    <span>July 2026</span>
+  </div>
+
+</div><!-- /wrapper -->
+
+<script>
+(function () {
+  var copyIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+  var checkIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+
+  var blocks = document.querySelectorAll('pre');
+
+  blocks.forEach(function (pre) {
+    var wrap = document.createElement('div');
+    wrap.className = 'code-wrap';
+
+    var btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.type = 'button';
+    btn.innerHTML = copyIcon + '<span>Copy</span>';
+
+    pre.parentNode.insertBefore(wrap, pre);
+    wrap.appendChild(pre);
+    wrap.appendChild(btn);
+
+    btn.addEventListener('click', function () {
+      var text = pre.textContent;
+
+      function showCopied() {
+        btn.innerHTML = checkIcon + '<span>Copied</span>';
+        btn.classList.add('copied');
+        setTimeout(function () {
+          btn.innerHTML = copyIcon + '<span>Copy</span>';
+          btn.classList.remove('copied');
+        }, 1800);
+      }
+
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(showCopied).catch(function () {
+          fallbackCopy(text, showCopied);
+        });
+      } else {
+        fallbackCopy(text, showCopied);
+      }
+    });
+  });
+
+  function fallbackCopy(text, onDone) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+    onDone();
+  }
+
+  // OS tab switcher
+  var macBtn = document.getElementById('osBtnMac');
+  var winBtn = document.getElementById('osBtnWin');
+  macBtn.addEventListener('click', function () {
+    document.body.classList.remove('mode-win');
+    document.body.classList.add('mode-mac');
+  });
+  winBtn.addEventListener('click', function () {
+    document.body.classList.remove('mode-mac');
+    document.body.classList.add('mode-win');
+  });
+})();
+</script>
+
+</body>
+</html>
