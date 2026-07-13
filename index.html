@@ -1013,6 +1013,17 @@ exit 0
 # top of the report -- every report now states plainly what levels were
 # requested, what succeeded, and exactly why anything failed, instead of
 # a single generic "no results found" line.
+#
+# v6 change: Test Step Results no longer lists every step in one long
+# flat table. Steps are grouped by testCaseId (the logical test case, not
+# the per-execution caseResultId) and rendered one test case per PAGE --
+# Prev/Next moves between whole test cases, not rows. A test case with
+# more than 60 steps folds into a single collapsed &lt;details&gt; toggle on
+# its own page. Also fixes an overflow bug where a long, unbroken
+# Message/Action value (a locator, a URL) could stretch the Test Step
+# Results table past the report's bounds and push Error Type/Duration out
+# of view -- the table now uses a fixed column-width layout with
+# selective word-wrapping so this can't happen.
 # -------------------------------------------------------------
 
 set -uo pipefail
@@ -1032,7 +1043,7 @@ fi
 export REPORT_DIR
 
 OUT_PATH=$(python3 &lt;&lt;'PYEOF'
-import json, os, glob, html as html_lib
+import json, os, glob, sys, html as html_lib
 
 run_id = os.environ["RUN_ID"]
 report_dir = os.environ["REPORT_DIR"]
@@ -1152,6 +1163,7 @@ def fmt_duration(v):
 
 sections_html = []
 table_scripts = []
+group_pager_scripts = []
 
 # Curated order for the Test Plan Summary -- answers "what happened" at a
 # glance instead of reading like a raw API dump. Everything not listed
@@ -1226,6 +1238,128 @@ def render_table(title, rows, columns, table_id):
         '&lt;table id="{tid}" class="data"&gt;&lt;thead&gt;&lt;tr&gt;{thead}&lt;/tr&gt;&lt;/thead&gt;'
         '&lt;tbody&gt;{tbody}&lt;/tbody&gt;&lt;/table&gt;{pager}&lt;/section&gt;'
     ).format(title=esc(title), n=n, tid=table_id, thead=thead, tbody=tbody, pager=pager)
+
+# Steps are grouped by testCaseId (the logical test case), not by
+# caseResultId (a single execution instance of that case) -- so two
+# execution rows for the same case (e.g. a retry) land in one group.
+# Each test case is rendered as its own PAGE (one testCaseId visible at a
+# time, Prev/Next to move between them) -- not stacked one after another.
+# Within a page, if that test case has more than STEP_FOLD_THRESHOLD
+# steps, its table is collapsed into a single &lt;details&gt; toggle with no
+# inner pagination; at or under the threshold it renders open.
+STEP_FOLD_THRESHOLD = 60
+
+# caseResultId, stepId, type, action, message, result, errorType, duration
+# -- percentages sum to 100. table-layout:fixed (set on .step-data in the
+# stylesheet) makes the browser honor these widths regardless of content,
+# and word-break/overflow-wrap on the cells (also in the stylesheet) wraps
+# long, unbroken text (locators, URLs) inside its column instead of
+# growing the column -- this is what was pushing Error Type/Duration out
+# of the report's bounds: table-layout:auto (the default) sizes columns
+# to fit their widest single unbroken token with no wrap, so one long
+# Message/Action value stretched the whole table past its container.
+STEP_COLUMNS = ["caseResultId", "stepId", "type", "action", "message", "result", "errorType", "duration"]
+STEP_COLUMN_WIDTHS = [11, 7, 9, 19, 20, 13, 14, 7]
+# Only these two columns hold genuinely unbounded free text (locators,
+# URLs, arbitrary messages) and need aggressive word-break/overflow-wrap.
+# Everything else (IDs, Type, Result, Error Type, Duration) is a short,
+# bounded vocabulary (SUCCESS/FAILURE/NOT_EXECUTED, NLP_TEXT, "21.8s", ...)
+# that should never be force-broken mid-word -- those columns instead get
+# single-line + ellipsis (with the full value in a title tooltip) as a
+# defensive fallback, so a value like "SUCCESS" never gets mangled into
+# "SUCCES"/"S" the way a blanket overflow-wrap:anywhere would do.
+STEP_WRAP_COLUMNS = {"action", "message"}
+
+def render_step_rows_table(rows):
+    colgroup = "".join('&lt;col style="width:{}%"&gt;'.format(w) for w in STEP_COLUMN_WIDTHS)
+    thead_cells = []
+    for c in STEP_COLUMNS:
+        label = esc(pretty_label(c))
+        thead_cells.append('&lt;th title="{label}"&gt;{label}&lt;/th&gt;'.format(label=label))
+    thead = "".join(thead_cells)
+    body_rows = []
+    for r in rows:
+        cells = []
+        for c in STEP_COLUMNS:
+            val = r.get(c, "")
+            if c.lower().endswith("duration") and val not in (None, ""):
+                formatted = fmt_duration(val)
+                val = formatted if formatted is not None else val
+            esc_val = esc(val)
+            if c in STEP_WRAP_COLUMNS:
+                cells.append("&lt;td&gt;{}&lt;/td&gt;".format(esc_val))
+            else:
+                cells.append('&lt;td title="{v}"&gt;{v}&lt;/td&gt;'.format(v=esc_val))
+        body_rows.append("&lt;tr&gt;{}&lt;/tr&gt;".format("".join(cells)))
+    return (
+        '&lt;table class="data step-data"&gt;&lt;colgroup&gt;{colgroup}&lt;/colgroup&gt;'
+        '&lt;thead&gt;&lt;tr&gt;{thead}&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;{tbody}&lt;/tbody&gt;&lt;/table&gt;'
+    ).format(colgroup=colgroup, thead=thead, tbody="".join(body_rows))
+
+def render_step_groups(steps, title, group_pager_scripts):
+    n_total = len(steps)
+    groups = {}
+    order = []
+    for s in steps:
+        tc_id = s.get("testCaseId", "")
+        if tc_id not in groups:
+            groups[tc_id] = []
+            order.append(tc_id)
+        groups[tc_id].append(s)
+
+    # Group order = execution order, not a numeric/alphabetic re-sort of
+    # testCaseId. `order` is already first-seen order while iterating
+    # `all_steps`, which itself comes from `step_files` in glob-sorted
+    # (caseResultId) order -- i.e. the same order the original flat table
+    # displayed rows in. This keeps the report readable as "what happened,
+    # in the order it happened" rather than reshuffling by ID value.
+    ordered_ids = order
+
+    page_html_parts = []
+    for tc_id in ordered_ids:
+        rows = groups[tc_id]
+        n = len(rows)
+        exec_ids = sorted({str(r.get("caseResultId", "")) for r in rows})
+        exec_label = ", ".join(exec_ids)
+        has_failure = any(str(r.get("result", "")).upper() == "FAILURE" for r in rows)
+        badge = (
+            '&lt;span class="sum-badge sum-failed"&gt;has failures&lt;/span&gt;' if has_failure
+            else '&lt;span class="sum-badge sum-ok"&gt;no failures&lt;/span&gt;'
+        )
+        header = (
+            '&lt;div class="step-case-header"&gt;&lt;span class="step-case-title"&gt;Test Case {tc}&lt;/span&gt; '
+            '&lt;span class="count"&gt;({n} step(s) across execution(s): {execs})&lt;/span&gt; {badge}&lt;/div&gt;'
+        ).format(tc=esc(tc_id), n=n, execs=esc(exec_label), badge=badge)
+
+        table_html = render_step_rows_table(rows)
+
+        if n &gt; STEP_FOLD_THRESHOLD:
+            summary_text = "Test Case {tc} -- {n} steps, folded (click to expand)".format(tc=esc(tc_id), n=n)
+            content = '&lt;details class="step-case-fold"&gt;&lt;summary&gt;{summary}&lt;/summary&gt;{header}{table}&lt;/details&gt;'.format(
+                summary=summary_text, header=header, table=table_html
+            )
+        else:
+            content = '&lt;div class="step-case"&gt;{header}{table}&lt;/div&gt;'.format(header=header, table=table_html)
+
+        page_html_parts.append('&lt;div class="step-case-page"&gt;{content}&lt;/div&gt;'.format(content=content))
+
+    n_groups = len(ordered_ids)
+    pager = ""
+    if n_groups &gt; 1:
+        pager = (
+            '&lt;div class="pager"&gt;'
+            '&lt;button id="stepPager_prev"&gt;&amp;laquo; Prev&lt;/button&gt;'
+            '&lt;span id="stepPager_pageLabel"&gt;&lt;/span&gt;'
+            '&lt;button id="stepPager_next"&gt;Next &amp;raquo;&lt;/button&gt;'
+            '&lt;/div&gt;'
+        )
+        group_pager_scripts.append("stepPager")
+
+    return (
+        '&lt;section&gt;&lt;h2&gt;{title} &lt;span class="count"&gt;({n} entries across {g} test case(s))&lt;/span&gt;&lt;/h2&gt;'
+        '&lt;div id="stepGroupsContainer"&gt;{pages}&lt;/div&gt;{pager}&lt;/section&gt;'
+    ).format(title=esc(title), n=n_total, g=n_groups, pages="".join(page_html_parts), pager=pager)
+
 
 def render_fetch_summary(entries):
     if not entries:
@@ -1307,15 +1441,44 @@ if case_files:
 
 step_files = sorted(glob.glob(os.path.join(report_dir, "{}_steps_*.jsonl".format(run_id))))
 if step_files:
+    # Map caseResultId -&gt; testCaseId from the case-level files already
+    # fetched above. testCaseId is the *logical* test case; caseResultId
+    # is one execution instance of it (e.g. a retry produces a second
+    # caseResultId for the same testCaseId). Steps only carry
+    # caseResultId natively, so this map is required to group by the
+    # logical case as requested. Falls back to grouping by caseResultId
+    # itself if case_files is empty (e.g. TS_CASE_RESULT_IDS/discovery
+    # yielded nothing) so steps are never silently dropped.
+    case_result_to_test_case = {}
+    for p in case_files:
+        try:
+            c = flatten(load_json(p))
+        except (OSError, json.JSONDecodeError) as exc:
+            # stderr, not stdout: the bash side does
+            # OUT_PATH=$(python3 &lt;&lt;'PYEOF' ... print(out_path) ... PYEOF)
+            # -- anything written to stdout here would corrupt OUT_PATH.
+            print(
+                "[WARN] Could not read/parse {} while building the "
+                "caseResultId-&gt;testCaseId map ({}); its step(s) will fall "
+                "back to grouping by caseResultId instead of testCaseId.".format(p, exc),
+                file=sys.stderr,
+            )
+            continue
+        cr_id = str(c.get("id", ""))
+        if cr_id:
+            case_result_to_test_case[cr_id] = str(c.get("testCaseId", cr_id))
+
     all_steps = []
     for p in step_files:
-        case_id = p.split("_steps_")[-1].replace(".jsonl", "")
+        case_result_id = p.split("_steps_")[-1].replace(".jsonl", "")
+        test_case_id = case_result_to_test_case.get(case_result_id, case_result_id)
         for step in load_jsonl(p):
             step = dict(step)
-            step["caseResultId"] = case_id
+            step["caseResultId"] = case_result_id
+            step["testCaseId"] = test_case_id
             all_steps.append(step)
-    cols = ["caseResultId", "stepId", "type", "action", "message", "result", "errorType", "duration"]
-    sections_html.append(render_table("Test Step Results", all_steps, cols, "stepTable"))
+
+    sections_html.append(render_step_groups(all_steps, "Test Step Results", group_pager_scripts))
 
 # Only shown if literally nothing was fetched -- with the PLAN baseline in
 # fetch-report.sh this should now be rare, but kept as a last-resort message.
@@ -1324,6 +1487,7 @@ if not os.path.exists(plan_path) and not (suite_files or case_files or step_file
                           'see the Fetch Summary panel above for exactly why.&lt;/p&gt;&lt;/section&gt;')
 
 pagination_js_calls = "\n".join('      paginateTable("{}", 20);'.format(tid) for tid in table_scripts)
+group_pagination_js_calls = "\n".join('      paginateGroups("stepGroupsContainer", "{}");'.format(gid) for gid in group_pager_scripts)
 
 html_doc = """&lt;!DOCTYPE html&gt;
 &lt;html lang="en"&gt;
@@ -1369,6 +1533,33 @@ html_doc = """&lt;!DOCTYPE html&gt;
   .plan-extra summary {{ cursor: pointer; color: #00838c; font-size: 12.5px; font-weight: 600; padding: 4px 0; }}
   .plan-extra summary:hover {{ color: #005f66; }}
   .plan-extra table {{ margin-top: 8px; }}
+  .step-case {{ margin-top: 22px; }}
+  .step-case-header {{ margin-bottom: 6px; }}
+  .step-case-title {{ font-weight: 600; color: #183247; margin-right: 4px; }}
+  .step-case-fold {{ margin-top: 22px; border: 1px solid #e5e3da; border-radius: 8px; padding: 12px 16px; background: #fafaf7; }}
+  .step-case-fold summary {{ cursor: pointer; color: #00838c; font-weight: 600; font-size: 13.5px; }}
+  .step-case-fold summary:hover {{ color: #005f66; }}
+  .step-case-fold[open] summary {{ margin-bottom: 10px; }}
+  .step-case-page {{ margin-top: 4px; }}
+  /* Fixes long, unbroken values (locators, URLs) in Message/Action from
+     stretching the table past the report's bounds and pushing later
+     columns (Error Type, Duration) out of view: table-layout:auto (the
+     default) sizes a column to fit its single widest unbroken token with
+     no wrap; fixed + word-break forces every column to stay within its
+     assigned width and wrap long content instead. */
+  table.step-data {{ table-layout: fixed; }}
+  /* Default: single line + ellipsis (full value still in the title
+     tooltip) -- correct for IDs/Type/Result/Error Type/Duration, which
+     are all short, bounded vocabularies and should never wrap. */
+  table.step-data th, table.step-data td {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  /* Action (4th column) and Message (5th column) are the only genuinely
+     unbounded free-text columns (locators, URLs, arbitrary messages) --
+     these wrap and break long unbroken tokens instead of stretching the
+     table past the report's bounds. */
+  table.step-data th:nth-child(4), table.step-data td:nth-child(4),
+  table.step-data th:nth-child(5), table.step-data td:nth-child(5) {{
+    white-space: normal; word-break: break-word; overflow-wrap: anywhere; text-overflow: clip;
+  }}
 &lt;/style&gt;
 &lt;/head&gt;
 &lt;body&gt;
@@ -1408,7 +1599,38 @@ function paginateTable(tableId, pageSize) {{
 
   render();
 }}
+
+// Pages by whole .step-case-page blocks (one test case per page) rather
+// than by row count -- used for Test Step Results, which is now paginated
+// per test case instead of stacking every test case's steps in one view.
+function paginateGroups(containerId, idPrefix) {{
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  const pages = Array.from(container.children).filter((el) =&gt; el.classList.contains('step-case-page'));
+  const totalPages = Math.max(1, pages.length);
+  let currentPage = 1;
+
+  function render() {{
+    pages.forEach((page, idx) =&gt; {{
+      page.style.display = (idx + 1 === currentPage) ? '' : 'none';
+    }});
+    const label = document.getElementById(idPrefix + '_pageLabel');
+    if (label) label.textContent = 'Page ' + currentPage + ' of ' + totalPages;
+    const prevBtn = document.getElementById(idPrefix + '_prev');
+    const nextBtn = document.getElementById(idPrefix + '_next');
+    if (prevBtn) prevBtn.disabled = (currentPage === 1);
+    if (nextBtn) nextBtn.disabled = (currentPage === totalPages);
+  }}
+
+  const prevEl = document.getElementById(idPrefix + '_prev');
+  const nextEl = document.getElementById(idPrefix + '_next');
+  if (prevEl) prevEl.addEventListener('click', () =&gt; {{ if (currentPage &gt; 1) {{ currentPage--; render(); }} }});
+  if (nextEl) nextEl.addEventListener('click', () =&gt; {{ if (currentPage &lt; totalPages) {{ currentPage++; render(); }} }});
+
+  render();
+}}
 {pagination_calls}
+{group_pagination_calls}
 &lt;/script&gt;
 &lt;/body&gt;
 &lt;/html&gt;""".format(
@@ -1417,6 +1639,7 @@ function paginateTable(tableId, pageSize) {{
     build_number=esc(os.environ.get("BUILD_NUMBER", "")),
     sections="".join(sections_html),
     pagination_calls=pagination_js_calls,
+    group_pagination_calls=group_pagination_js_calls,
     logo=TESTSIGMA_LOGO_B64,
 )
 
@@ -1978,6 +2201,17 @@ exit 0
 # fetch-report.ps1) and renders it as a "Fetch Summary" panel at the very
 # top of the report -- every report now states plainly what levels were
 # requested, what succeeded, and exactly why anything failed.
+#
+# v6 change: Test Step Results no longer lists every step in one long
+# flat table. Steps are grouped by testCaseId (the logical test case, not
+# the per-execution caseResultId) and rendered one test case per PAGE --
+# Prev/Next moves between whole test cases, not rows. A test case with
+# more than 60 steps folds into a single collapsed &lt;details&gt; toggle on
+# its own page. Also fixes an overflow bug where a long, unbroken
+# Message/Action value (a locator, a URL) could stretch the Test Step
+# Results table past the report's bounds and push Error Type/Duration out
+# of view -- the table now uses a fixed column-width layout with
+# selective word-wrapping so this can't happen.
 # -------------------------------------------------------------
 
 $ErrorActionPreference = "Stop"
@@ -2018,6 +2252,7 @@ try {
     }
 
     $tableScripts = New-Object System.Collections.Generic.List[string]
+    $groupPagerScripts = New-Object System.Collections.Generic.List[string]
     $sections = New-Object System.Text.StringBuilder
 
     # Plain-English labels for table headers -- raw dotted JSON key paths
@@ -2148,6 +2383,102 @@ try {
         return "&lt;section&gt;&lt;h2&gt;$(HtmlEncode $title) &lt;span class=""count""&gt;($n entries)&lt;/span&gt;&lt;/h2&gt;&lt;table id=""$tableId"" class=""data""&gt;&lt;thead&gt;&lt;tr&gt;$thead&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;$tbody&lt;/tbody&gt;&lt;/table&gt;$pager&lt;/section&gt;"
     }
 
+    # Steps are grouped by testCaseId (the logical test case), not
+    # caseResultId (one execution instance of it) -- so a retry that
+    # produces a second caseResultId for the same case lands in the same
+    # group. Each test case renders as its own PAGE (one visible at a
+    # time, Prev/Next to move between them) rather than stacked one after
+    # another. Within a page, a test case with more than
+    # StepFoldThreshold steps collapses into a single &lt;details&gt; toggle
+    # with no inner pagination; at or under the threshold it renders open.
+    # Mirrors generate-html-report.sh.
+    $StepFoldThreshold = 60
+
+    # caseResultId, stepId, type, action, message, result, errorType,
+    # duration -- percentages sum to 100, measured against the report's
+    # actual font stack/size so common values (SUCCESS, NOT_EXECUTED,
+    # ASSERT_ERROR, "Case Result ID" header) fit on one line without
+    # truncating. table-layout:fixed (set on .step-data in the stylesheet)
+    # makes the browser honor these widths regardless of content, which
+    # is what fixes the original overflow bug: table-layout:auto (the
+    # default) sizes a column to fit its single widest unbroken token with
+    # no wrap, so one long Message/Action locator/URL stretched the whole
+    # table past the report's bounds and pushed Error Type/Duration out of
+    # view. Only Action/Message (genuinely unbounded free text) get
+    # aggressive word-break in the stylesheet; every other column here is
+    # a short, bounded vocabulary and stays single-line with an
+    # ellipsis+title fallback instead of being force-broken mid-word.
+    $StepColumns = @("caseResultId","stepId","type","action","message","result","errorType","duration")
+    $StepColumnWidths = @(11, 7, 9, 19, 20, 13, 14, 7)
+
+    function Render-StepRowsTable([array]$rows) {
+        $colgroup = ($StepColumnWidths | ForEach-Object { "&lt;col style=""width:$($_)%""&gt;" }) -join ""
+        $thead = ($StepColumns | ForEach-Object {
+            $label = HtmlEncode (Get-PrettyLabel $_)
+            "&lt;th title=""$label""&gt;$label&lt;/th&gt;"
+        }) -join ""
+        $bodyRows = foreach ($r in $rows) {
+            $cells = ($StepColumns | ForEach-Object {
+                $val = if ($r.Contains($_)) { $r[$_] } else { "" }
+                if ($_.ToLower().EndsWith("duration") -and $null -ne $val -and $val -ne "") {
+                    $formatted = Format-Duration $val
+                    if ($null -ne $formatted) { $val = $formatted }
+                }
+                $encoded = HtmlEncode $val
+                if ($_ -eq "action" -or $_ -eq "message") {
+                    "&lt;td&gt;$encoded&lt;/td&gt;"
+                } else {
+                    "&lt;td title=""$encoded""&gt;$encoded&lt;/td&gt;"
+                }
+            }) -join ""
+            "&lt;tr&gt;$cells&lt;/tr&gt;"
+        }
+        return "&lt;table class=""data step-data""&gt;&lt;colgroup&gt;$colgroup&lt;/colgroup&gt;&lt;thead&gt;&lt;tr&gt;$thead&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;$($bodyRows -join '')&lt;/tbody&gt;&lt;/table&gt;"
+    }
+
+    function Render-StepGroups([array]$steps, [string]$title, [System.Collections.Generic.List[string]]$groupPagerScripts) {
+        $nTotal = $steps.Count
+        $groups = [ordered]@{}
+        foreach ($s in $steps) {
+            $tcId = [string]$s["testCaseId"]
+            if (-not $groups.Contains($tcId)) { $groups[$tcId] = New-Object System.Collections.Generic.List[hashtable] }
+            $groups[$tcId].Add($s)
+        }
+
+        # Group order = execution order (insertion order of $groups, which
+        # follows $stepFiles in glob-sorted/caseResultId order) -- not a
+        # re-sort by testCaseId value. Keeps the report readable as "what
+        # happened, in the order it happened."
+        $pageHtmlParts = foreach ($tcId in $groups.Keys) {
+            $rows = $groups[$tcId]
+            $n = $rows.Count
+            $execIds = ($rows | ForEach-Object { [string]$_["caseResultId"] } | Select-Object -Unique | Sort-Object)
+            $execLabel = $execIds -join ", "
+            $hasFailure = $false
+            foreach ($r in $rows) { if ([string]$r["result"] -eq "FAILURE") { $hasFailure = $true; break } }
+            $badge = if ($hasFailure) { '&lt;span class="sum-badge sum-failed"&gt;has failures&lt;/span&gt;' } else { '&lt;span class="sum-badge sum-ok"&gt;no failures&lt;/span&gt;' }
+            $header = "&lt;div class=""step-case-header""&gt;&lt;span class=""step-case-title""&gt;Test Case $(HtmlEncode $tcId)&lt;/span&gt; &lt;span class=""count""&gt;($n step(s) across execution(s): $(HtmlEncode $execLabel))&lt;/span&gt; $badge&lt;/div&gt;"
+            $table = Render-StepRowsTable $rows
+
+            $content = if ($n -gt $StepFoldThreshold) {
+                $summaryText = "Test Case $(HtmlEncode $tcId) -- $n steps, folded (click to expand)"
+                "&lt;details class=""step-case-fold""&gt;&lt;summary&gt;$summaryText&lt;/summary&gt;$header$table&lt;/details&gt;"
+            } else {
+                "&lt;div class=""step-case""&gt;$header$table&lt;/div&gt;"
+            }
+            "&lt;div class=""step-case-page""&gt;$content&lt;/div&gt;"
+        }
+
+        $g = $groups.Keys.Count
+        $pager = ""
+        if ($g -gt 1) {
+            $pager = '&lt;div class="pager"&gt;&lt;button id="stepPager_prev"&gt;&amp;laquo; Prev&lt;/button&gt;&lt;span id="stepPager_pageLabel"&gt;&lt;/span&gt;&lt;button id="stepPager_next"&gt;Next &amp;raquo;&lt;/button&gt;&lt;/div&gt;'
+            $groupPagerScripts.Add("stepPager")
+        }
+
+        return "&lt;section&gt;&lt;h2&gt;$(HtmlEncode $title) &lt;span class=""count""&gt;($nTotal entries across $g test case(s))&lt;/span&gt;&lt;/h2&gt;&lt;div id=""stepGroupsContainer""&gt;$($pageHtmlParts -join '')&lt;/div&gt;$pager&lt;/section&gt;"
+    }
+
     function Render-FetchSummary([array]$entries) {
         if (-not $entries -or $entries.Count -eq 0) { return "" }
         $statusClass = @{ "OK" = "sum-ok"; "OK (baseline)" = "sum-baseline"; "PARTIAL" = "sum-partial"; "FAILED" = "sum-failed" }
@@ -2206,20 +2537,48 @@ try {
 
     $stepFiles = Get-ChildItem -Path $reportDir -Filter "$($runId)_steps_*.jsonl" -ErrorAction SilentlyContinue | Sort-Object Name
     if ($stepFiles) {
+        # Map caseResultId -&gt; testCaseId using the case-level files loaded
+        # above for Test Case Results. testCaseId is the logical test case;
+        # caseResultId is one execution instance of it (a retry produces a
+        # second caseResultId for the same testCaseId). Steps only carry
+        # caseResultId natively, so this map is required to group by the
+        # logical case. Falls back to grouping by caseResultId itself if a
+        # given case file can't be read/parsed, so steps are never silently
+        # dropped from the report.
+        $caseResultToTestCase = @{}
+        if ($caseFiles) {
+            foreach ($cf in $caseFiles) {
+                try {
+                    $c = Flatten-Object -obj (Get-Content $cf.FullName -Raw | ConvertFrom-Json)
+                    $crId = [string]$c["id"]
+                    if ($crId) {
+                        $tcId = if ($c.Contains("testCaseId")) { [string]$c["testCaseId"] } else { $crId }
+                        $caseResultToTestCase[$crId] = $tcId
+                    }
+                } catch {
+                    # Write-Host, not stdout redirection -- this script has no
+                    # OUT_PATH-style stdout capture, so this is safe to log
+                    # directly rather than silently swallow.
+                    Write-Host "[WARN] Could not read/parse $($cf.FullName) while building the caseResultId-&gt;testCaseId map ($($_.Exception.Message)); its step(s) will fall back to grouping by caseResultId instead of testCaseId."
+                }
+            }
+        }
+
         $allSteps = New-Object System.Collections.Generic.List[hashtable]
         foreach ($sf in $stepFiles) {
             $caseId = $sf.BaseName -replace '.*_steps_', ''
+            $testCaseId = if ($caseResultToTestCase.ContainsKey($caseId)) { $caseResultToTestCase[$caseId] } else { $caseId }
             Get-Content $sf.FullName | ForEach-Object {
                 if ($_.Trim()) {
                     $obj = $_ | ConvertFrom-Json
                     $flat = Flatten-Object -obj $obj
                     $flat["caseResultId"] = $caseId
+                    $flat["testCaseId"] = $testCaseId
                     $allSteps.Add($flat)
                 }
             }
         }
-        $cols = @("caseResultId","stepId","type","action","message","result","errorType","duration")
-        [void]$sections.Append((Render-Table "Test Step Results" $allSteps.ToArray() $cols "stepTable"))
+        [void]$sections.Append((Render-StepGroups $allSteps.ToArray() "Test Step Results" $groupPagerScripts))
     }
 
     # Only shown if literally nothing was fetched -- with the PLAN baseline in
@@ -2229,6 +2588,7 @@ try {
     }
 
     $paginationCalls = ($tableScripts | ForEach-Object { "      paginateTable(""$_"", 20);" }) -join "`n"
+    $groupPaginationCalls = ($groupPagerScripts | ForEach-Object { "      paginateGroups(""stepGroupsContainer"", ""$_"");" }) -join "`n"
 
     $outPath = Join-Path $reportDir "ts-report_$runId.html"
 
@@ -2282,6 +2642,27 @@ try {
   .plan-extra summary { cursor: pointer; color: #00838c; font-size: 12.5px; font-weight: 600; padding: 4px 0; }
   .plan-extra summary:hover { color: #005f66; }
   .plan-extra table { margin-top: 8px; }
+  .step-case { margin-top: 22px; }
+  .step-case-header { margin-bottom: 6px; }
+  .step-case-title { font-weight: 600; color: #183247; margin-right: 4px; }
+  .step-case-fold { margin-top: 22px; border: 1px solid #e5e3da; border-radius: 8px; padding: 12px 16px; background: #fafaf7; }
+  .step-case-fold summary { cursor: pointer; color: #00838c; font-weight: 600; font-size: 13.5px; }
+  .step-case-fold summary:hover { color: #005f66; }
+  .step-case-fold[open] summary { margin-bottom: 10px; }
+  .step-case-page { margin-top: 4px; }
+  table.step-data { table-layout: fixed; }
+  /* Default: single line + ellipsis (full value still in the title
+     tooltip) -- correct for IDs/Type/Result/Error Type/Duration, which
+     are all short, bounded vocabularies and should never wrap. */
+  table.step-data th, table.step-data td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Action (4th column) and Message (5th column) are the only genuinely
+     unbounded free-text columns (locators, URLs, arbitrary messages) --
+     these wrap and break long unbroken tokens instead of stretching the
+     table past the report's bounds. */
+  table.step-data th:nth-child(4), table.step-data td:nth-child(4),
+  table.step-data th:nth-child(5), table.step-data td:nth-child(5) {
+    white-space: normal; word-break: break-word; overflow-wrap: anywhere; text-overflow: clip;
+  }
 &lt;/style&gt;
 &lt;/head&gt;
 &lt;body&gt;
@@ -2321,7 +2702,38 @@ function paginateTable(tableId, pageSize) {
 
   render();
 }
+
+// Pages by whole .step-case-page blocks (one test case per page) rather
+// than by row count -- used for Test Step Results, which is now paginated
+// per test case instead of stacking every test case's steps in one view.
+function paginateGroups(containerId, idPrefix) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  const pages = Array.from(container.children).filter((el) =&gt; el.classList.contains('step-case-page'));
+  const totalPages = Math.max(1, pages.length);
+  let currentPage = 1;
+
+  function render() {
+    pages.forEach((page, idx) =&gt; {
+      page.style.display = (idx + 1 === currentPage) ? '' : 'none';
+    });
+    const label = document.getElementById(idPrefix + '_pageLabel');
+    if (label) label.textContent = 'Page ' + currentPage + ' of ' + totalPages;
+    const prevBtn = document.getElementById(idPrefix + '_prev');
+    const nextBtn = document.getElementById(idPrefix + '_next');
+    if (prevBtn) prevBtn.disabled = (currentPage === 1);
+    if (nextBtn) nextBtn.disabled = (currentPage === totalPages);
+  }
+
+  const prevEl = document.getElementById(idPrefix + '_prev');
+  const nextEl = document.getElementById(idPrefix + '_next');
+  if (prevEl) prevEl.addEventListener('click', () =&gt; { if (currentPage &gt; 1) { currentPage--; render(); } });
+  if (nextEl) nextEl.addEventListener('click', () =&gt; { if (currentPage &lt; totalPages) { currentPage++; render(); } });
+
+  render();
+}
 $paginationCalls
+$groupPaginationCalls
 &lt;/script&gt;
 &lt;/body&gt;
 &lt;/html&gt;
@@ -2863,13 +3275,19 @@ Run ID: &lt;number&gt; | result: SUCCESS | status: STATUS_COMPLETED | elapsed: 3
       <strong>The Test Plan Summary is a curated summary, not a raw dump.</strong> Testsigma's plan-level response has ~40 fields, most of which are internal execution config (step timeouts, hook IDs, internal run IDs) nobody needs at a glance. The section now leads with <strong>Result, Duration, Start/End Time, Triggered By, Build, and the pass/fail/stopped/not-executed counts</strong> &mdash; in plain English, with duration shown as e.g. <code>2m 36s</code> instead of raw milliseconds. Everything else is still there, just collapsed into an <strong>"Additional execution details"</strong> section you click to expand (plain HTML <code>&lt;details&gt;</code>, no JavaScript) &mdash; nothing is deleted, it's just not the first thing you have to read past. The same plain-English headers and duration formatting apply to the Machine/Suite/Case/Step tables below it too.
     </div>
 
+    <div class="callout callout-green">
+      <strong>v6: Test Step Results is now paginated per test case, not per row.</strong> Steps are grouped by <code>testCaseId</code> (the logical test case, not the per-execution <code>caseResultId</code> &mdash; so a retry that produces a second case result still lands in the same group) and each test case gets its own page: Prev/Next moves between whole test cases, one visible at a time, instead of stacking every test case's steps in one long scroll. A test case with more than <strong>60 steps</strong> folds into a single collapsed <code>&lt;details&gt;</code> toggle on its own page &mdash; no inner pagination, just click to expand. This also fixes an earlier overflow bug: a long, unbroken locator or URL in a Message/Action value could stretch the whole table past the report's bounds and push Error Type/Duration out of view. The Test Step Results table now uses a fixed column-width layout, with only the genuinely free-text Action/Message columns allowed to wrap &mdash; every other column (IDs, Type, Result, Error Type, Duration) is a short, bounded vocabulary and stays on one line instead of being force-broken mid-word.
+    </div>
+
     <table class="data-table">
       <thead><tr><th>What</th><th>Behavior</th></tr></thead>
       <tbody>
         <tr><td>Fetch Summary</td><td>Always first, if <code>fetch-report</code> ran at all &mdash; collapsed by default, its title line flags whether anything needs attention.</td></tr>
         <tr><td>Test Plan Summary</td><td>Curated: key facts first, ~30 secondary fields collapsed below (see callout above).</td></tr>
         <tr><td>One file per run</td><td>Every requested level appears as its own section (Test Plan Summary, Test Suite Results, &hellip;) inside the same HTML document &mdash; not as separate files.</td></tr>
-        <tr><td>Pagination</td><td>Any table with more than 20 rows gets Prev/Next buttons. This is plain JavaScript baked into the file itself &mdash; no CDN, no server, works from a local double-click with no internet connection.</td></tr>
+        <tr><td>Pagination (Suite/Case tables)</td><td>Any Suite/Case table with more than 20 rows gets Prev/Next buttons. Plain JavaScript baked into the file itself &mdash; no CDN, no server, works from a local double-click with no internet connection.</td></tr>
+        <tr><td>Pagination (Test Step Results)</td><td><strong>v6:</strong> paginated per test case instead of per row &mdash; one test case per page, Prev/Next moves between test cases. Same offline vanilla-JS mechanism, different unit of paging.</td></tr>
+        <tr><td>Step folding</td><td><strong>v6:</strong> a test case with more than 60 steps collapses into a single click-to-expand <code>&lt;details&gt;</code> toggle on its own page, so one unusually long test case doesn't dominate the report.</td></tr>
         <tr><td>Raw JSON</td><td>Kept, not deleted. The <code>.json</code>/<code>.jsonl</code> files fetch-report wrote sit in the same <code>ts-reports/</code> folder as the HTML, for anything you want to script against later (e.g. the override workflow from the earlier API scoping discussion).</td></tr>
         <tr><td>If generation fails</td><td>You still get the raw JSON &mdash; the console prints an <code>[ERROR]</code>/<code>[WARN]</code> line naming the problem, and the build's pass/fail is untouched (a broken report never masks a real TestPlan failure).</td></tr>
         <tr><td>If literally nothing was fetched</td><td>Now rare, since PLAN is always fetched as a baseline &mdash; but if even that failed (e.g. API unreachable), the report says so plainly and points you at the Fetch Summary panel rather than a bare "no results" line.</td></tr>
