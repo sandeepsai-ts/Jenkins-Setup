@@ -322,6 +322,8 @@ RUN_ID=$(<span class="fn">echo</span> <span class="s">"$BODY"</span> | python3 -
 <span class="fn">echo</span> <span class="s">"$RUN_ID"</span> &gt; <span class="s">"${RUN_ID_FILE:-/tmp/ts_run_id_manual-run}"</span>
 <span class="fn">echo</span> <span class="s">"[OK] Execution started. Run ID: ${RUN_ID}"</span>
 <span class="fn">echo</span> <span class="s">"[INFO] Run ID saved to: ${RUN_ID_FILE:-/tmp/ts_run_id_manual-run}"</span></pre>
+          <p>Then make it executable:</p>
+          <pre><span class="fn">chmod</span> +x trigger-run.sh</pre>
         </div></div>
         </div><!-- /mac-only -->
 
@@ -746,6 +748,8 @@ LAST_UNRECOGNIZED_LC=""
   <span class="fn">sleep</span> <span class="s">"$POLL_INTERVAL"</span>
   ELAPSED=$(( ELAPSED + POLL_INTERVAL ))
 <span class="k">done</span></pre>
+          <p>Then make both scripts executable:</p>
+          <pre><span class="fn">chmod</span> +x trigger-run.sh poll-status.sh</pre>
         </div></div>
         </div><!-- /mac-only -->
 
@@ -1711,6 +1715,8 @@ print(<span class="s">f"[OK] Report written to {out_path}"</span>)</pre>
       <pre><span class="c">#!/bin/bash
 <span class="k">set</span> -euo pipefail
 python3 "$(<span class="fn">dirname</span> "$0")/generate-html-report.py"</span></pre>
+      <p>Then make all four shell scripts executable (<code>generate-html-report.py</code> is invoked via <code>python3</code>, so it doesn't need the executable bit):</p>
+      <pre><span class="fn">chmod</span> +x trigger-run.sh poll-status.sh fetch-report.sh generate-html-report.sh</pre>
     </div></div>
     </div><!-- /mac-only -->
     <div class="win-only">
