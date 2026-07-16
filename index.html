@@ -311,9 +311,9 @@ BODY=$(<span class="fn">cat</span> <span class="s">"$TMPFILE"</span>)
   <span class="k">exit</span> 1
 <span class="k">fi</span>
 
-RUN_ID=$(<span class="fn">echo</span> <span class="s">"$BODY"</span> | python3 -c <span class="s">"import sys,json; print(json.load(sys.stdin)['id'])"</span>)
+RUN_ID=$(<span class="fn">echo</span> <span class="s">"$BODY"</span> | python3 -c <span class="s">"import sys,json; d=json.load(sys.stdin); v=d.get('id'); print(v if v is not None else '')"</span>)
 
-<span class="k">if</span> [[ -z <span class="s">"$RUN_ID"</span> || <span class="s">"$RUN_ID"</span> == <span class="s">"null"</span> ]]; <span class="k">then</span>
+<span class="k">if</span> [[ -z <span class="s">"$RUN_ID"</span> ]]; <span class="k">then</span>
   <span class="fn">echo</span> <span class="s">"[ERROR] Could not read Run ID from response."</span>
   <span class="fn">echo</span> <span class="s">"$BODY"</span>
   <span class="k">exit</span> 1
@@ -572,9 +572,9 @@ BODY=$(<span class="fn">cat</span> <span class="s">"$TMPFILE"</span>)
   <span class="k">exit</span> 1
 <span class="k">fi</span>
 
-RUN_ID=$(<span class="fn">echo</span> <span class="s">"$BODY"</span> | python3 -c <span class="s">"import sys,json; print(json.load(sys.stdin)['id'])"</span>)
+RUN_ID=$(<span class="fn">echo</span> <span class="s">"$BODY"</span> | python3 -c <span class="s">"import sys,json; d=json.load(sys.stdin); v=d.get('id'); print(v if v is not None else '')"</span>)
 
-<span class="k">if</span> [[ -z <span class="s">"$RUN_ID"</span> || <span class="s">"$RUN_ID"</span> == <span class="s">"null"</span> ]]; <span class="k">then</span>
+<span class="k">if</span> [[ -z <span class="s">"$RUN_ID"</span> ]]; <span class="k">then</span>
   <span class="fn">echo</span> <span class="s">"[ERROR] Could not read Run ID from response."</span>
   <span class="fn">echo</span> <span class="s">"$BODY"</span>
   <span class="k">exit</span> 1
@@ -724,14 +724,44 @@ LAST_UNRECOGNIZED_LC=""
   <span class="fn">echo</span> <span class="s">"[INFO] Status: ${STATUS} (elapsed ${ELAPSED}s)"</span>
 
   <span class="k">case</span> <span class="s">"$STATUS"</span> <span class="k">in</span>
-    PASSED|FAILED|FAILURE|STOPPED|ERROR|ABORTED)
+    PASSED|SUCCESS|PASS|FAILED|FAILURE|STOPPED|ERROR|ABORTED)
+      <span class="c"># v1's result looks terminal -- but v1 (execution_results) and v2
+      # (test_runs / Plan) have been observed to update at different times.
+      # fetch-report.sh reports on the v2 Plan object, so confirm THAT one
+      # agrees nothing is still running/queued before handing off to it.</span>
+      PLAN_TMPFILE=$(<span class="fn">mktemp</span>)
+      PLAN_HTTP_CODE=$(<span class="fn">curl</span> -s -o <span class="s">"$PLAN_TMPFILE"</span> -w <span class="s">"%{http_code}"</span>         -H <span class="s">"Authorization: Bearer ${TS_API_TOKEN}"</span> -H <span class="s">"Accept: application/json"</span>         <span class="s">"https://app.testsigma.com/api/v2/test_runs/${RUN_ID}"</span>)
+      PLAN_BODY=$(<span class="fn">cat</span> <span class="s">"$PLAN_TMPFILE"</span>); <span class="fn">rm</span> -f <span class="s">"$PLAN_TMPFILE"</span>
+
+      <span class="k">if</span> [[ <span class="s">"$PLAN_HTTP_CODE"</span> != <span class="s">"200"</span> ]]; <span class="k">then</span>
+        <span class="fn">echo</span> <span class="s">"[WARN] Could not confirm Plan completion via v2 (HTTP ${PLAN_HTTP_CODE}) -- trusting v1 terminal status: ${STATUS}"</span>
+        <span class="fn">echo</span> <span class="s">"[DONE] Terminal status reached: ${STATUS}"</span>
+        <span class="k">exit</span> 0
+      <span class="k">fi</span>
+
+      PLAN_STILL_ACTIVE=$(<span class="fn">echo</span> <span class="s">"$PLAN_BODY"</span> | python3 -c <span class="s">"
+import sys, json
+d = json.load(sys.stdin)
+metrics = d.get('metrics', {}) if isinstance(d.get('metrics'), dict) else {}
+running = metrics.get('runningCount', 0) or 0
+queued = metrics.get('queuedCount', 0) or 0
+print('yes' if (running or queued) else 'no')
+"</span> 2&gt;/dev/null || <span class="fn">echo</span> <span class="s">"no"</span>)
+
+      <span class="k">if</span> [[ <span class="s">"$PLAN_STILL_ACTIVE"</span> == <span class="s">"yes"</span> ]]; <span class="k">then</span>
+        <span class="fn">echo</span> <span class="s">"[INFO] v1 result is terminal (${STATUS}) but the Plan still has suites running/queued -- waiting for the Plan itself to finish."</span>
+        <span class="fn">sleep</span> <span class="s">"$POLL_INTERVAL"</span>; ELAPSED=$(( ELAPSED + POLL_INTERVAL )); <span class="k">continue</span>
+      <span class="k">fi</span>
+
       <span class="fn">echo</span> <span class="s">"[DONE] Terminal status reached: ${STATUS}"</span>
       <span class="k">exit</span> 0 ;;
   <span class="k">esac</span>
 
   <span class="c"># Fail-safe: Testsigma's result vocabulary isn't fully documented, and it has
-  # already been observed to diverge from what this list assumed (FAILURE vs
-  # FAILED). If the same unrecognized, non-"in-progress" value shows up on two
+  # already been observed to diverge from what this list assumed twice now
+  # (FAILURE vs FAILED, then SUCCESS vs PASSED -- the latter caused a real
+  # passing run to be marked FAILED before SUCCESS/PASS were added above).
+  # If the same unrecognized, non-"in-progress" value shows up on two
   # consecutive polls, treat it as terminal and fail safe instead of polling
   # for hours (or, unbounded, forever) on a status this script doesn't know.</span>
   STATUS_LC=$(<span class="fn">echo</span> <span class="s">"$STATUS"</span> | <span class="fn">tr</span> '[:upper:]' '[:lower:]')
@@ -808,7 +838,27 @@ Write-Host <span class="s">"[INFO] Polling Testsigma for Run ID: $runId"</span>
     $consecutiveFailures = 0
     $status = $resp.result
     Write-Host <span class="s">"[INFO] Status: $status (elapsed ${elapsed}s)"</span>
-    <span class="k">if</span> ($status <span class="k">-in</span> @(<span class="s">"PASSED"</span>,<span class="s">"FAILED"</span>,<span class="s">"FAILURE"</span>,<span class="s">"STOPPED"</span>,<span class="s">"ERROR"</span>,<span class="s">"ABORTED"</span>)) {
+    <span class="k">if</span> ($status <span class="k">-in</span> @(<span class="s">"PASSED"</span>,<span class="s">"SUCCESS"</span>,<span class="s">"PASS"</span>,<span class="s">"FAILED"</span>,<span class="s">"FAILURE"</span>,<span class="s">"STOPPED"</span>,<span class="s">"ERROR"</span>,<span class="s">"ABORTED"</span>)) {
+      <span class="c"># v1's result looks terminal -- but v1 (execution_results) and v2
+      # (test_runs / Plan) have been observed to update at different times.
+      # fetch-report.ps1 reports on the v2 Plan object, so confirm THAT one
+      # agrees nothing is still running/queued before handing off to it.</span>
+      $planStillActive = $false
+      <span class="k">try</span> {
+        $planResp = Invoke-RestMethod -Uri <span class="s">"https://app.testsigma.com/api/v2/test_runs/$runId"</span> -Method Get `
+          -Headers @{ "Authorization" = "Bearer $env:TS_API_TOKEN"; "Accept" = "application/json" }
+        $planRunning = <span class="k">if</span> ($planResp.metrics.runningCount) { $planResp.metrics.runningCount } <span class="k">else</span> { 0 }
+        $planQueued = <span class="k">if</span> ($planResp.metrics.queuedCount) { $planResp.metrics.queuedCount } <span class="k">else</span> { 0 }
+        $planStillActive = ($planRunning -gt 0) -or ($planQueued -gt 0)
+      } <span class="k">catch</span> {
+        Write-Host <span class="s">"[WARN] Could not confirm Plan completion via v2: $($_.Exception.Message) -- trusting v1 terminal status: $status"</span>
+      }
+      <span class="k">if</span> ($planStillActive) {
+        Write-Host <span class="s">"[INFO] v1 result is terminal ($status) but the Plan still has suites running/queued -- waiting for the Plan itself to finish."</span>
+        Start-Sleep -Seconds $pollInterval
+        $elapsed += $pollInterval
+        <span class="k">continue</span>
+      }
       Write-Host <span class="s">"[DONE] Terminal status reached: $status"</span>; <span class="k">exit</span> 0
     }
     <span class="c"># Fail-safe: same unrecognized non-"in-progress" value on two
@@ -1133,9 +1183,9 @@ BODY=$(<span class="fn">cat</span> <span class="s">"$TMPFILE"</span>)
   <span class="k">exit</span> 1
 <span class="k">fi</span>
 
-RUN_ID=$(<span class="fn">echo</span> <span class="s">"$BODY"</span> | python3 -c <span class="s">"import sys,json; print(json.load(sys.stdin)['id'])"</span>)
+RUN_ID=$(<span class="fn">echo</span> <span class="s">"$BODY"</span> | python3 -c <span class="s">"import sys,json; d=json.load(sys.stdin); v=d.get('id'); print(v if v is not None else '')"</span>)
 
-<span class="k">if</span> [[ -z <span class="s">"$RUN_ID"</span> || <span class="s">"$RUN_ID"</span> == <span class="s">"null"</span> ]]; <span class="k">then</span>
+<span class="k">if</span> [[ -z <span class="s">"$RUN_ID"</span> ]]; <span class="k">then</span>
   <span class="fn">echo</span> <span class="s">"[ERROR] Could not read Run ID from response."</span>
   <span class="fn">echo</span> <span class="s">"$BODY"</span>
   <span class="k">exit</span> 1
@@ -1285,14 +1335,44 @@ LAST_UNRECOGNIZED_LC=""
   <span class="fn">echo</span> <span class="s">"[INFO] Status: ${STATUS} (elapsed ${ELAPSED}s)"</span>
 
   <span class="k">case</span> <span class="s">"$STATUS"</span> <span class="k">in</span>
-    PASSED|FAILED|FAILURE|STOPPED|ERROR|ABORTED)
+    PASSED|SUCCESS|PASS|FAILED|FAILURE|STOPPED|ERROR|ABORTED)
+      <span class="c"># v1's result looks terminal -- but v1 (execution_results) and v2
+      # (test_runs / Plan) have been observed to update at different times.
+      # fetch-report.sh reports on the v2 Plan object, so confirm THAT one
+      # agrees nothing is still running/queued before handing off to it.</span>
+      PLAN_TMPFILE=$(<span class="fn">mktemp</span>)
+      PLAN_HTTP_CODE=$(<span class="fn">curl</span> -s -o <span class="s">"$PLAN_TMPFILE"</span> -w <span class="s">"%{http_code}"</span>         -H <span class="s">"Authorization: Bearer ${TS_API_TOKEN}"</span> -H <span class="s">"Accept: application/json"</span>         <span class="s">"https://app.testsigma.com/api/v2/test_runs/${RUN_ID}"</span>)
+      PLAN_BODY=$(<span class="fn">cat</span> <span class="s">"$PLAN_TMPFILE"</span>); <span class="fn">rm</span> -f <span class="s">"$PLAN_TMPFILE"</span>
+
+      <span class="k">if</span> [[ <span class="s">"$PLAN_HTTP_CODE"</span> != <span class="s">"200"</span> ]]; <span class="k">then</span>
+        <span class="fn">echo</span> <span class="s">"[WARN] Could not confirm Plan completion via v2 (HTTP ${PLAN_HTTP_CODE}) -- trusting v1 terminal status: ${STATUS}"</span>
+        <span class="fn">echo</span> <span class="s">"[DONE] Terminal status reached: ${STATUS}"</span>
+        <span class="k">exit</span> 0
+      <span class="k">fi</span>
+
+      PLAN_STILL_ACTIVE=$(<span class="fn">echo</span> <span class="s">"$PLAN_BODY"</span> | python3 -c <span class="s">"
+import sys, json
+d = json.load(sys.stdin)
+metrics = d.get('metrics', {}) if isinstance(d.get('metrics'), dict) else {}
+running = metrics.get('runningCount', 0) or 0
+queued = metrics.get('queuedCount', 0) or 0
+print('yes' if (running or queued) else 'no')
+"</span> 2&gt;/dev/null || <span class="fn">echo</span> <span class="s">"no"</span>)
+
+      <span class="k">if</span> [[ <span class="s">"$PLAN_STILL_ACTIVE"</span> == <span class="s">"yes"</span> ]]; <span class="k">then</span>
+        <span class="fn">echo</span> <span class="s">"[INFO] v1 result is terminal (${STATUS}) but the Plan still has suites running/queued -- waiting for the Plan itself to finish."</span>
+        <span class="fn">sleep</span> <span class="s">"$POLL_INTERVAL"</span>; ELAPSED=$(( ELAPSED + POLL_INTERVAL )); <span class="k">continue</span>
+      <span class="k">fi</span>
+
       <span class="fn">echo</span> <span class="s">"[DONE] Terminal status reached: ${STATUS}"</span>
       <span class="k">exit</span> 0 ;;
   <span class="k">esac</span>
 
   <span class="c"># Fail-safe: Testsigma's result vocabulary isn't fully documented, and it has
-  # already been observed to diverge from what this list assumed (FAILURE vs
-  # FAILED). If the same unrecognized, non-"in-progress" value shows up on two
+  # already been observed to diverge from what this list assumed twice now
+  # (FAILURE vs FAILED, then SUCCESS vs PASSED -- the latter caused a real
+  # passing run to be marked FAILED before SUCCESS/PASS were added above).
+  # If the same unrecognized, non-"in-progress" value shows up on two
   # consecutive polls, treat it as terminal and fail safe instead of polling
   # for hours (or, unbounded, forever) on a status this script doesn't know.</span>
   STATUS_LC=$(<span class="fn">echo</span> <span class="s">"$STATUS"</span> | <span class="fn">tr</span> '[:upper:]' '[:lower:]')
@@ -1366,7 +1446,27 @@ Write-Host <span class="s">"[INFO] Polling Testsigma for Run ID: $runId"</span>
     $consecutiveFailures = 0
     $status = $resp.result
     Write-Host <span class="s">"[INFO] Status: $status (elapsed ${elapsed}s)"</span>
-    <span class="k">if</span> ($status <span class="k">-in</span> @(<span class="s">"PASSED"</span>,<span class="s">"FAILED"</span>,<span class="s">"FAILURE"</span>,<span class="s">"STOPPED"</span>,<span class="s">"ERROR"</span>,<span class="s">"ABORTED"</span>)) {
+    <span class="k">if</span> ($status <span class="k">-in</span> @(<span class="s">"PASSED"</span>,<span class="s">"SUCCESS"</span>,<span class="s">"PASS"</span>,<span class="s">"FAILED"</span>,<span class="s">"FAILURE"</span>,<span class="s">"STOPPED"</span>,<span class="s">"ERROR"</span>,<span class="s">"ABORTED"</span>)) {
+      <span class="c"># v1's result looks terminal -- but v1 (execution_results) and v2
+      # (test_runs / Plan) have been observed to update at different times.
+      # fetch-report.ps1 reports on the v2 Plan object, so confirm THAT one
+      # agrees nothing is still running/queued before handing off to it.</span>
+      $planStillActive = $false
+      <span class="k">try</span> {
+        $planResp = Invoke-RestMethod -Uri <span class="s">"https://app.testsigma.com/api/v2/test_runs/$runId"</span> -Method Get `
+          -Headers @{ "Authorization" = "Bearer $env:TS_API_TOKEN"; "Accept" = "application/json" }
+        $planRunning = <span class="k">if</span> ($planResp.metrics.runningCount) { $planResp.metrics.runningCount } <span class="k">else</span> { 0 }
+        $planQueued = <span class="k">if</span> ($planResp.metrics.queuedCount) { $planResp.metrics.queuedCount } <span class="k">else</span> { 0 }
+        $planStillActive = ($planRunning -gt 0) -or ($planQueued -gt 0)
+      } <span class="k">catch</span> {
+        Write-Host <span class="s">"[WARN] Could not confirm Plan completion via v2: $($_.Exception.Message) -- trusting v1 terminal status: $status"</span>
+      }
+      <span class="k">if</span> ($planStillActive) {
+        Write-Host <span class="s">"[INFO] v1 result is terminal ($status) but the Plan still has suites running/queued -- waiting for the Plan itself to finish."</span>
+        Start-Sleep -Seconds $pollInterval
+        $elapsed += $pollInterval
+        <span class="k">continue</span>
+      }
       Write-Host <span class="s">"[DONE] Terminal status reached: $status"</span>; <span class="k">exit</span> 0
     }
     <span class="c"># Fail-safe: same unrecognized non-"in-progress" value on two
@@ -1396,52 +1496,64 @@ Write-Host <span class="s">"[INFO] Polling Testsigma for Run ID: $runId"</span>
     <div class="mac-only">
     <div class="step"><div class="step-num">17</div><div class="step-body">
       <p>Save as <code>fetch-report.sh</code> — fetches PLAN, and auto-discovers SUITE/CASE/STEP results with no manual ID lookup:</p>
-      <pre><span class="c">#!/bin/bash
-# -------------------------------------------------------------
-# fetch-report.sh
-# Downloads raw JSON results for a finished Testsigma run into
-# REPORT_DIR. SUITE and CASE auto-discover their own IDs via
-# Testsigma's paginated list endpoints (TS_SUITE_RESULT_IDS /
-# TS_CASE_RESULT_IDS can override with a manual comma-separated
-# subset). STEP reuses the CASE id list. A short pace delay runs
-# between requests to stay well clear of rate limits.
-#
-# Required: TS_API_TOKEN, RUN_ID_FILE, REPORT_DIR
-# Optional: TS_REPORT_LEVELS (default "SUITE,CASE,STEP"; PLAN is
-#           always fetched as a baseline), TS_SUITE_RESULT_IDS,
-#           TS_CASE_RESULT_IDS, PACING_SECONDS (default 1)
-# -------------------------------------------------------------</span>
+      <pre><span class="c">#!/bin/bash</span>
+<span class="c"># -------------------------------------------------------------</span>
+<span class="c"># fetch-report.sh</span>
+<span class="c"># Downloads raw JSON results for a finished Testsigma run into</span>
+<span class="c"># REPORT_DIR. SUITE and CASE auto-discover their own IDs via</span>
+<span class="c"># Testsigma's paginated list endpoints (TS_SUITE_RESULT_IDS /</span>
+<span class="c"># TS_CASE_RESULT_IDS can override with a manual comma-separated</span>
+<span class="c"># subset). STEP reuses the CASE id list. A short pace delay runs</span>
+<span class="c"># between requests to stay well clear of rate limits.</span>
+<span class="c">#</span>
+<span class="c"># Also resolves human-readable Suite/Case names (the result</span>
+<span class="c"># objects above only carry suiteId/testCaseId, not a name) via</span>
+<span class="c"># two extra, deduped lookups -- one per unique ID, not per row:</span>
+<span class="c">#   SUITE name: GET /api/v2/test_suites/{id}      -- small, no</span>
+<span class="c">#               secrets, saved to disk as-is.</span>
+<span class="c">#   CASE name:  GET /api/v1/test_cases/{id}       -- this response</span>
+<span class="c">#               embeds live credentials (jwtApiKey etc.) deep in</span>
+<span class="c">#               lastRun.environmentSettings, so ONLY the "name"</span>
+<span class="c">#               field is extracted; the raw response is never</span>
+<span class="c">#               written to REPORT_DIR or archived as a Jenkins</span>
+<span class="c">#               artifact.</span>
+<span class="c">#</span>
+<span class="c"># Required: TS_API_TOKEN, RUN_ID_FILE, REPORT_DIR</span>
+<span class="c"># Optional: TS_REPORT_LEVELS (default "SUITE,CASE,STEP"; PLAN is</span>
+<span class="c">#           always fetched as a baseline), TS_SUITE_RESULT_IDS,</span>
+<span class="c">#           TS_CASE_RESULT_IDS, PACING_SECONDS (default 1)</span>
+<span class="c"># -------------------------------------------------------------</span>
 
-<span class="k">set</span> -uo pipefail
+set -uo pipefail
 RUN_ID_FILE="${RUN_ID_FILE:-/tmp/ts_run_id_manual-run}"
 PACING="${PACING_SECONDS:-1}"
 LEVELS_RAW="${TS_REPORT_LEVELS:-SUITE,CASE,STEP}"
-<span class="k">if</span> [[ <span class="s">"$LEVELS_RAW"</span> == <span class="s">"ALL"</span> ]]; <span class="k">then</span> LEVELS_RAW="PLAN,SUITE,CASE,STEP"; <span class="k">fi</span>
-IFS=',' <span class="fn">read</span> -ra LEVELS &lt;&lt;&lt; <span class="s">"$LEVELS_RAW"</span>
+if [[ "$LEVELS_RAW" == "ALL" ]]; then LEVELS_RAW="PLAN,SUITE,CASE,STEP"; fi
+IFS=',' read -ra LEVELS &lt;&lt;&lt; "$LEVELS_RAW"
 
-<span class="k">if</span> [[ -z <span class="s">"${TS_API_TOKEN:-}"</span> ]]; <span class="k">then</span> <span class="fn">echo</span> <span class="s">"[ERROR] TS_API_TOKEN is not set."</span>; <span class="k">exit</span> 1; <span class="k">fi</span>
-<span class="k">if</span> [[ ! -f <span class="s">"$RUN_ID_FILE"</span> ]]; <span class="k">then</span> <span class="fn">echo</span> <span class="s">"[ERROR] Run ID file not found at ${RUN_ID_FILE}."</span>; <span class="k">exit</span> 1; <span class="k">fi</span>
-RUN_ID=$(<span class="fn">cat</span> <span class="s">"$RUN_ID_FILE"</span>)
+if [[ -z "${TS_API_TOKEN:-}" ]]; then echo "[ERROR] TS_API_TOKEN is not set."; exit 1; fi
+if [[ ! -f "$RUN_ID_FILE" ]]; then echo "[ERROR] Run ID file not found at ${RUN_ID_FILE}."; exit 1; fi
+RUN_ID=$(cat "$RUN_ID_FILE")
 REPORT_DIR="${REPORT_DIR:-./ts-reports}"
-<span class="fn">mkdir</span> -p <span class="s">"$REPORT_DIR"</span>
+mkdir -p "$REPORT_DIR"
 FAILURES=0
 
 ts_get() {
-  <span class="c"># $1 url, $2 out file -- returns 0 ok, 1 http failure</span>
+<span class="c">  # $1 url, $2 out file -- returns 0 ok, 1 http failure</span>
   local code
-  code=$(<span class="fn">curl</span> -s -o <span class="s">"$2"</span> -w <span class="s">"%{http_code}"</span> -H <span class="s">"Authorization: Bearer ${TS_API_TOKEN}"</span> -H <span class="s">"Accept: application/json"</span> <span class="s">"$1"</span>)
-  <span class="k">if</span> [[ <span class="s">"$code"</span> != <span class="s">"200"</span> ]]; <span class="k">then</span> <span class="fn">echo</span> <span class="s">"[ERROR] GET ${1} -&gt; HTTP ${code}"</span> &gt;&amp;2; <span class="k">return</span> 1; <span class="k">fi</span>
-  <span class="k">return</span> 0
+  code=$(curl -s -o "$2" -w "%{http_code}" -H "Authorization: Bearer ${TS_API_TOKEN}" -H "Accept: application/json" "$1")
+  if [[ "$code" != "200" ]]; then echo "[ERROR] GET ${1} -&gt; HTTP ${code}" &gt;&amp;2; return 1; fi
+  return 0
 }
 
 ts_get_paginated_ids() {
-  <span class="c"># $1 base_url, $2 out_prefix (writes each item as &lt;prefix&gt;&lt;id&gt;.json), $3 label
-  # prints discovered ids, one per line, to stdout</span>
+<span class="c">  # $1 base_url, $2 out_prefix (writes each item as &lt;prefix&gt;&lt;id&gt;.json), $3 label</span>
+<span class="c">  # prints discovered ids, one per line, to stdout</span>
   local base_url="$1" out_prefix="$2" label="$3" page=0 total_pages=1
-  <span class="k">while</span> [[ <span class="s">"$page"</span> -lt <span class="s">"$total_pages"</span> ]]; <span class="k">do</span>
-    local paged; paged=$(<span class="fn">mktemp</span>)
-    <span class="k">if</span> ! ts_get <span class="s">"${base_url}?page=${page}&amp;size=100"</span> <span class="s">"$paged"</span>; <span class="k">then</span> <span class="fn">rm</span> -f <span class="s">"$paged"</span>; <span class="k">return</span> 1; <span class="k">fi</span>
-    python3 -c <span class="s">"
+  while [[ "$page" -lt "$total_pages" ]]; do
+    local paged; paged=$(mktemp)
+    if ! ts_get "${base_url}?page=${page}&amp;size=100" "$paged"; then rm -f "$paged"; return 1; fi
+    python3 -c "
 import json
 with open('$paged') as f: data = json.load(f)
 for item in data.get('content', []):
@@ -1451,264 +1563,750 @@ for item in data.get('content', []):
             json.dump(item, out)
         print(iid)
 print('__TOTAL_PAGES__' + str(data.get('totalPages', 1) or 1), file=__import__('sys').stderr)
-"</span> &gt; <span class="s">"${paged}.ids"</span> 2&gt;<span class="s">"${paged}.meta"</span> || { <span class="fn">echo</span> <span class="s">"[ERROR] Failed to parse ${label} list (page ${page})."</span>; <span class="fn">rm</span> -f <span class="s">"$paged"</span> "${paged}.ids" "${paged}.meta"; <span class="k">return</span> 1; }
-    total_pages=$(<span class="fn">grep</span> -o '__TOTAL_PAGES__[0-9]*' "${paged}.meta" | <span class="fn">grep</span> -o '[0-9]*$')
-    <span class="fn">cat</span> "${paged}.ids"
-    <span class="fn">rm</span> -f <span class="s">"$paged"</span> "${paged}.ids" "${paged}.meta"
+" &gt; "${paged}.ids" 2&gt;"${paged}.meta" || { echo "[ERROR] Failed to parse ${label} list (page ${page})."; rm -f "$paged" "${paged}.ids" "${paged}.meta"; return 1; }
+    total_pages=$(grep -o '__TOTAL_PAGES__[0-9]*' "${paged}.meta" | grep -o '[0-9]*$')
+    cat "${paged}.ids"
+    rm -f "$paged" "${paged}.ids" "${paged}.meta"
     page=$(( page + 1 ))
-    <span class="fn">sleep</span> <span class="s">"$PACING"</span>
-  <span class="k">done</span>
+    sleep "$PACING"
+  done
 }
 
 <span class="c"># --- PLAN (always fetched as a baseline) ---</span>
-<span class="fn">echo</span> <span class="s">"[INFO] Fetching PLAN level..."</span>
-ts_get <span class="s">"https://app.testsigma.com/api/v2/test_runs/${RUN_ID}"</span> <span class="s">"${REPORT_DIR}/${RUN_ID}_plan.json"</span> || FAILURES=$(( FAILURES + 1 ))
-<span class="fn">sleep</span> <span class="s">"$PACING"</span>
+echo "[INFO] Fetching PLAN level..."
+ts_get "https://app.testsigma.com/api/v2/test_runs/${RUN_ID}" "${REPORT_DIR}/${RUN_ID}_plan.json" || FAILURES=$(( FAILURES + 1 ))
+sleep "$PACING"
 
 <span class="c"># --- SUITE ---</span>
-<span class="k">if</span> [[ <span class="s">" ${LEVELS[*]} "</span> == *<span class="s">" SUITE "</span>* ]]; <span class="k">then</span>
-  <span class="k">if</span> [[ -n <span class="s">"${TS_SUITE_RESULT_IDS:-}"</span> ]]; <span class="k">then</span>
-    IFS=',' <span class="fn">read</span> -ra SIDS &lt;&lt;&lt; <span class="s">"${TS_SUITE_RESULT_IDS// /}"</span>
-    <span class="k">for</span> sid <span class="k">in</span> <span class="s">"${SIDS[@]}"</span>; <span class="k">do</span>
-      <span class="fn">echo</span> <span class="s">"[INFO] Fetching SUITE ${sid} (manual override)..."</span>
-      ts_get <span class="s">"https://app.testsigma.com/api/v2/test_runs/${RUN_ID}/test_suite_results/${sid}"</span> <span class="s">"${REPORT_DIR}/${RUN_ID}_suite_${sid}.json"</span> || FAILURES=$(( FAILURES + 1 ))
-      <span class="fn">sleep</span> <span class="s">"$PACING"</span>
-    <span class="k">done</span>
-  <span class="k">else</span>
-    <span class="fn">echo</span> <span class="s">"[INFO] Auto-discovering SUITE ids..."</span>
-    ids=$(ts_get_paginated_ids <span class="s">"https://app.testsigma.com/api/v2/test_runs/${RUN_ID}/test_suite_results"</span> <span class="s">"${REPORT_DIR}/${RUN_ID}_suite_"</span> <span class="s">"SUITE"</span>) || FAILURES=$(( FAILURES + 1 ))
-    <span class="fn">echo</span> <span class="s">"[OK] SUITE -&gt; $(echo "$ids" | grep -c . || true) result(s) auto-discovered"</span>
-  <span class="k">fi</span>
-<span class="k">fi</span>
+if [[ " ${LEVELS[*]} " == *" SUITE "* ]]; then
+  if [[ -n "${TS_SUITE_RESULT_IDS:-}" ]]; then
+    IFS=',' read -ra SIDS &lt;&lt;&lt; "${TS_SUITE_RESULT_IDS// /}"
+    for sid in "${SIDS[@]}"; do
+      echo "[INFO] Fetching SUITE ${sid} (manual override)..."
+      ts_get "https://app.testsigma.com/api/v2/test_runs/${RUN_ID}/test_suite_results/${sid}" "${REPORT_DIR}/${RUN_ID}_suite_${sid}.json" || FAILURES=$(( FAILURES + 1 ))
+      sleep "$PACING"
+    done
+  else
+    echo "[INFO] Auto-discovering SUITE ids..."
+    ids=$(ts_get_paginated_ids "https://app.testsigma.com/api/v2/test_runs/${RUN_ID}/test_suite_results" "${REPORT_DIR}/${RUN_ID}_suite_" "SUITE") || FAILURES=$(( FAILURES + 1 ))
+    echo "[OK] SUITE -&gt; $(echo "$ids" | grep -c . || true) result(s) auto-discovered"
+  fi
+
+<span class="c">  # --- SUITE NAMES: dedup by suiteId, one GET per unique suite. Small,</span>
+<span class="c">  # clean response -- safe to persist as-is. ---</span>
+  echo "[INFO] Resolving SUITE names..."
+  SUITE_IDS_FOR_NAMES=$(python3 -c "
+import glob, json
+ids = set()
+for f in glob.glob('${REPORT_DIR}/${RUN_ID}_suite_*.json'):
+    try:
+        with open(f) as fh:
+            item = json.load(fh)
+        sid = item.get('suiteId')
+        if sid is not None:
+            ids.add(sid)
+    except (json.JSONDecodeError, OSError):
+        pass
+for i in sorted(ids):
+    print(i)
+")
+  while IFS= read -r sid; do
+    [[ -z "$sid" ]] &amp;&amp; continue
+    OUT_FILE="${REPORT_DIR}/${RUN_ID}_suitename_${sid}.json"
+    if [[ -f "$OUT_FILE" ]]; then continue; fi
+    ts_get "https://app.testsigma.com/api/v2/test_suites/${sid}" "$OUT_FILE" || FAILURES=$(( FAILURES + 1 ))
+    sleep "$PACING"
+  done &lt;&lt;&lt; "$SUITE_IDS_FOR_NAMES"
+fi
 
 <span class="c"># --- CASE (ids shared with STEP) ---</span>
 CASE_IDS=""
-<span class="k">if</span> [[ <span class="s">" ${LEVELS[*]} "</span> == *<span class="s">" CASE "</span>* || <span class="s">" ${LEVELS[*]} "</span> == *<span class="s">" STEP "</span>* ]]; <span class="k">then</span>
-  <span class="k">if</span> [[ -n <span class="s">"${TS_CASE_RESULT_IDS:-}"</span> ]]; <span class="k">then</span>
+if [[ " ${LEVELS[*]} " == *" CASE "* || " ${LEVELS[*]} " == *" STEP "* ]]; then
+  if [[ -n "${TS_CASE_RESULT_IDS:-}" ]]; then
     CASE_IDS="${TS_CASE_RESULT_IDS// /}"
-    IFS=',' <span class="fn">read</span> -ra CIDS &lt;&lt;&lt; <span class="s">"$CASE_IDS"</span>
-    <span class="k">if</span> [[ <span class="s">" ${LEVELS[*]} "</span> == *<span class="s">" CASE "</span>* ]]; <span class="k">then</span>
-      <span class="k">for</span> cid <span class="k">in</span> <span class="s">"${CIDS[@]}"</span>; <span class="k">do</span>
-        <span class="fn">echo</span> <span class="s">"[INFO] Fetching CASE ${cid} (manual override)..."</span>
-        ts_get <span class="s">"https://app.testsigma.com/api/v2/test_runs/${RUN_ID}/test_case_results/${cid}"</span> <span class="s">"${REPORT_DIR}/${RUN_ID}_case_${cid}.json"</span> || FAILURES=$(( FAILURES + 1 ))
-        <span class="fn">sleep</span> <span class="s">"$PACING"</span>
-      <span class="k">done</span>
-    <span class="k">fi</span>
-  <span class="k">else</span>
-    <span class="fn">echo</span> <span class="s">"[INFO] Auto-discovering CASE ids..."</span>
-    CASE_IDS=$(ts_get_paginated_ids <span class="s">"https://app.testsigma.com/api/v2/test_runs/${RUN_ID}/test_case_results"</span> <span class="s">"${REPORT_DIR}/${RUN_ID}_case_"</span> <span class="s">"CASE"</span> | <span class="fn">tr</span> '\n' ',') || FAILURES=$(( FAILURES + 1 ))
-    <span class="k">if</span> [[ <span class="s">" ${LEVELS[*]} "</span> == *<span class="s">" CASE "</span>* ]]; <span class="k">then</span>
-      <span class="fn">echo</span> <span class="s">"[OK] CASE -&gt; auto-discovered"</span>
-    <span class="k">fi</span>
-  <span class="k">fi</span>
-<span class="k">fi</span>
+    IFS=',' read -ra CIDS &lt;&lt;&lt; "$CASE_IDS"
+    if [[ " ${LEVELS[*]} " == *" CASE "* ]]; then
+      for cid in "${CIDS[@]}"; do
+        echo "[INFO] Fetching CASE ${cid} (manual override)..."
+        ts_get "https://app.testsigma.com/api/v2/test_runs/${RUN_ID}/test_case_results/${cid}" "${REPORT_DIR}/${RUN_ID}_case_${cid}.json" || FAILURES=$(( FAILURES + 1 ))
+        sleep "$PACING"
+      done
+    fi
+  else
+    echo "[INFO] Auto-discovering CASE ids..."
+    CASE_IDS=$(ts_get_paginated_ids "https://app.testsigma.com/api/v2/test_runs/${RUN_ID}/test_case_results" "${REPORT_DIR}/${RUN_ID}_case_" "CASE" | tr '\n' ',') || FAILURES=$(( FAILURES + 1 ))
+    if [[ " ${LEVELS[*]} " == *" CASE "* ]]; then
+      echo "[OK] CASE -&gt; auto-discovered"
+    fi
+  fi
+
+<span class="c">  # --- CASE NAMES: dedup by testCaseId, one GET per unique case. This</span>
+<span class="c">  # response embeds live credentials -- extract "name" only, discard</span>
+<span class="c">  # everything else, and never write the raw response to disk. ---</span>
+  if [[ " ${LEVELS[*]} " == *" CASE "* ]]; then
+    echo "[INFO] Resolving CASE names..."
+    CASE_IDS_FOR_NAMES=$(python3 -c "
+import glob, json
+ids = set()
+for f in glob.glob('${REPORT_DIR}/${RUN_ID}_case_*.json'):
+    try:
+        with open(f) as fh:
+            item = json.load(fh)
+        cid = item.get('testCaseId')
+        if cid is not None:
+            ids.add(cid)
+    except (json.JSONDecodeError, OSError):
+        pass
+for i in sorted(ids):
+    print(i)
+")
+    while IFS= read -r tcid; do
+      [[ -z "$tcid" ]] &amp;&amp; continue
+      OUT_FILE="${REPORT_DIR}/${RUN_ID}_casename_${tcid}.json"
+      if [[ -f "$OUT_FILE" ]]; then continue; fi
+      RAW_TMPFILE=$(mktemp)
+      if ts_get "https://app.testsigma.com/api/v1/test_cases/${tcid}" "$RAW_TMPFILE"; then
+        python3 -c "
+import json
+with open('$RAW_TMPFILE') as f: d = json.load(f)
+with open('$OUT_FILE', 'w') as out:
+    json.dump({'id': $tcid, 'name': d.get('name')}, out)
+" || FAILURES=$(( FAILURES + 1 ))
+      else
+        FAILURES=$(( FAILURES + 1 ))
+      fi
+      rm -f "$RAW_TMPFILE"
+      sleep "$PACING"
+    done &lt;&lt;&lt; "$CASE_IDS_FOR_NAMES"
+  fi
+fi
 
 <span class="c"># --- STEP (per case id resolved above) ---</span>
-<span class="k">if</span> [[ <span class="s">" ${LEVELS[*]} "</span> == *<span class="s">" STEP "</span>* &amp;&amp; -n <span class="s">"$CASE_IDS"</span> ]]; <span class="k">then</span>
-  <span class="fn">echo</span> <span class="s">"[INFO] Fetching STEP level for each case result..."</span>
-  IFS=',' <span class="fn">read</span> -ra CIDS &lt;&lt;&lt; <span class="s">"${CASE_IDS%,}"</span>
-  <span class="k">for</span> cid <span class="k">in</span> <span class="s">"${CIDS[@]}"</span>; <span class="k">do</span>
-    [[ -z <span class="s">"$cid"</span> ]] &amp;&amp; <span class="k">continue</span>
-    ts_get <span class="s">"https://app.testsigma.com/api/v2/test_runs/${RUN_ID}/test_case_results/${cid}/step_results?page=0&amp;size=100"</span> <span class="s">"${REPORT_DIR}/${RUN_ID}_step_${cid}.json"</span> || FAILURES=$(( FAILURES + 1 ))
-    <span class="fn">sleep</span> <span class="s">"$PACING"</span>
-  <span class="k">done</span>
-<span class="k">fi</span>
+if [[ " ${LEVELS[*]} " == *" STEP "* &amp;&amp; -n "$CASE_IDS" ]]; then
+  echo "[INFO] Fetching STEP level for each case result..."
+  IFS=',' read -ra CIDS &lt;&lt;&lt; "${CASE_IDS%,}"
+  for cid in "${CIDS[@]}"; do
+    [[ -z "$cid" ]] &amp;&amp; continue
+    ts_get "https://app.testsigma.com/api/v2/test_runs/${RUN_ID}/test_case_results/${cid}/step_results?page=0&amp;size=100" "${REPORT_DIR}/${RUN_ID}_step_${cid}.json" || FAILURES=$(( FAILURES + 1 ))
+    sleep "$PACING"
+  done
+fi
 
-<span class="fn">echo</span> <span class="s">"[INFO] fetch-report.sh complete with ${FAILURES} failure(s)."</span>
-<span class="k">exit</span> $(( FAILURES &gt; 0 ? 1 : 0 ))</pre>
+echo "[INFO] fetch-report.sh complete with ${FAILURES} failure(s)."
+exit $(( FAILURES &gt; 0 ? 1 : 0 ))</pre>
     </div></div>
     </div><!-- /mac-only -->
     <div class="win-only">
     <div class="step"><div class="step-num">17</div><div class="step-body">
       <p>Save as <code>fetch-report.ps1</code> — same logic, native PowerShell JSON handling:</p>
-      <pre><span class="c"># -------------------------------------------------------------
-# fetch-report.ps1 -- see fetch-report.sh header for full parameter docs.
-# -------------------------------------------------------------</span>
-$ErrorActionPreference = <span class="s">"Continue"</span>
-<span class="k">if</span> (-not $env:TS_API_TOKEN) { Write-Host <span class="s">"[ERROR] TS_API_TOKEN is not set."</span>; <span class="k">exit</span> 1 }
-<span class="k">if</span> (-not (Test-Path $env:RUN_ID_FILE)) { Write-Host <span class="s">"[ERROR] Run ID file not found at $($env:RUN_ID_FILE)."</span>; <span class="k">exit</span> 1 }
+      <pre><span class="c"># -------------------------------------------------------------</span>
+<span class="c"># fetch-report.ps1 -- see fetch-report.sh header for full parameter docs.</span>
+<span class="c"># Also resolves human-readable Suite/Case names via two extra, deduped</span>
+<span class="c"># lookups (one per unique ID, not per row):</span>
+<span class="c">#   SUITE name: GET /api/v2/test_suites/{id}   -- small, no secrets,</span>
+<span class="c">#               saved to disk as-is.</span>
+<span class="c">#   CASE name:  GET /api/v1/test_cases/{id}    -- this response embeds</span>
+<span class="c">#               live credentials deep in lastRun.environmentSettings,</span>
+<span class="c">#               so ONLY the "name" field is extracted; the raw response</span>
+<span class="c">#               is never written to disk or archived as a build artifact.</span>
+<span class="c"># -------------------------------------------------------------</span>
+$ErrorActionPreference = "Continue"
+if (-not $env:TS_API_TOKEN) { Write-Host "[ERROR] TS_API_TOKEN is not set."; exit 1 }
+if (-not (Test-Path $env:RUN_ID_FILE)) { Write-Host "[ERROR] Run ID file not found at $($env:RUN_ID_FILE)."; exit 1 }
 $runId = (Get-Content $env:RUN_ID_FILE -Raw).Trim()
-$reportDir = <span class="k">if</span> ($env:REPORT_DIR) { $env:REPORT_DIR } <span class="k">else</span> { <span class="s">".\ts-reports"</span> }
+$reportDir = if ($env:REPORT_DIR) { $env:REPORT_DIR } else { ".\ts-reports" }
 New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
-$pacing = <span class="k">if</span> ($env:PACING_SECONDS) { [int]$env:PACING_SECONDS } <span class="k">else</span> { 1 }
-$levelsRaw = <span class="k">if</span> ($env:TS_REPORT_LEVELS) { $env:TS_REPORT_LEVELS } <span class="k">else</span> { <span class="s">"SUITE,CASE,STEP"</span> }
-<span class="k">if</span> ($levelsRaw -eq <span class="s">"ALL"</span>) { $levelsRaw = <span class="s">"PLAN,SUITE,CASE,STEP"</span> }
-$levels = $levelsRaw -split <span class="s">","</span>
+$pacing = if ($env:PACING_SECONDS) { [int]$env:PACING_SECONDS } else { 1 }
+$levelsRaw = if ($env:TS_REPORT_LEVELS) { $env:TS_REPORT_LEVELS } else { "SUITE,CASE,STEP" }
+if ($levelsRaw -eq "ALL") { $levelsRaw = "PLAN,SUITE,CASE,STEP" }
+$levels = $levelsRaw -split ","
 $failures = 0
 $headers = @{ "Authorization" = "Bearer $env:TS_API_TOKEN"; "Accept" = "application/json" }
 
 function Get-TsPaginatedIds($baseUrl, $outPrefix) {
   $page = 0; $totalPages = 1; $ids = @()
-  <span class="k">while</span> ($page -lt $totalPages) {
-    <span class="k">try</span> {
+  while ($page -lt $totalPages) {
+    try {
       $resp = Invoke-RestMethod -Uri "$baseUrl?page=$page&amp;size=100" -Method Get -Headers $headers
-    } <span class="k">catch</span> {
-      Write-Host <span class="s">"[ERROR] GET $baseUrl (page $page) failed: $($_.Exception.Message)"</span>; <span class="k">return</span> @()
+    } catch {
+      Write-Host "[ERROR] GET $baseUrl (page $page) failed: $($_.Exception.Message)"; return @()
     }
-    <span class="k">foreach</span> ($item <span class="k">in</span> $resp.content) {
+    foreach ($item in $resp.content) {
       $ids += $item.id
       ($item | ConvertTo-Json -Depth 10) | Set-Content -Path "$outPrefix$($item.id).json"
     }
-    $totalPages = <span class="k">if</span> ($resp.totalPages) { $resp.totalPages } <span class="k">else</span> { 1 }
+    $totalPages = if ($resp.totalPages) { $resp.totalPages } else { 1 }
     $page++
     Start-Sleep -Seconds $pacing
   }
-  <span class="k">return</span> $ids
+  return $ids
 }
 
 <span class="c"># --- PLAN (always fetched as a baseline) ---</span>
-Write-Host <span class="s">"[INFO] Fetching PLAN level..."</span>
-<span class="k">try</span> {
+Write-Host "[INFO] Fetching PLAN level..."
+try {
   $plan = Invoke-RestMethod -Uri "https://app.testsigma.com/api/v2/test_runs/$runId" -Method Get -Headers $headers
   ($plan | ConvertTo-Json -Depth 10) | Set-Content -Path "$reportDir\${runId}_plan.json"
-} <span class="k">catch</span> { Write-Host <span class="s">"[ERROR] PLAN fetch failed: $($_.Exception.Message)"</span>; $failures++ }
+} catch { Write-Host "[ERROR] PLAN fetch failed: $($_.Exception.Message)"; $failures++ }
 Start-Sleep -Seconds $pacing
 
 <span class="c"># --- SUITE ---</span>
-<span class="k">if</span> ($levels -contains <span class="s">"SUITE"</span>) {
-  <span class="k">if</span> ($env:TS_SUITE_RESULT_IDS) {
-    <span class="k">foreach</span> ($sid <span class="k">in</span> ($env:TS_SUITE_RESULT_IDS -split <span class="s">","</span> | ForEach-Object { $_.Trim() })) {
-      <span class="k">try</span> {
+if ($levels -contains "SUITE") {
+  if ($env:TS_SUITE_RESULT_IDS) {
+    foreach ($sid in ($env:TS_SUITE_RESULT_IDS -split "," | ForEach-Object { $_.Trim() })) {
+      try {
         $s = Invoke-RestMethod -Uri "https://app.testsigma.com/api/v2/test_runs/$runId/test_suite_results/$sid" -Method Get -Headers $headers
         ($s | ConvertTo-Json -Depth 10) | Set-Content -Path "$reportDir\${runId}_suite_$sid.json"
-      } <span class="k">catch</span> { $failures++ }
+      } catch { $failures++ }
       Start-Sleep -Seconds $pacing
     }
-  } <span class="k">else</span> {
-    Write-Host <span class="s">"[INFO] Auto-discovering SUITE ids..."</span>
+  } else {
+    Write-Host "[INFO] Auto-discovering SUITE ids..."
     $suiteIds = Get-TsPaginatedIds "https://app.testsigma.com/api/v2/test_runs/$runId/test_suite_results" "$reportDir\${runId}_suite_"
-    Write-Host <span class="s">"[OK] SUITE -&gt; $($suiteIds.Count) result(s) auto-discovered"</span>
+    Write-Host "[OK] SUITE -&gt; $($suiteIds.Count) result(s) auto-discovered"
+  }
+
+<span class="c">  # --- SUITE NAMES: dedup by suiteId, one GET per unique suite ---</span>
+  Write-Host "[INFO] Resolving SUITE names..."
+  $suiteIdsForNames = @()
+  Get-ChildItem -Path $reportDir -Filter "${runId}_suite_*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+      $item = Get-Content $_.FullName -Raw | ConvertFrom-Json
+      if ($item.suiteId) { $suiteIdsForNames += $item.suiteId }
+    } catch { }
+  }
+  $suiteIdsForNames = $suiteIdsForNames | Select-Object -Unique
+  foreach ($sid in $suiteIdsForNames) {
+    $outFile = "$reportDir\${runId}_suitename_$sid.json"
+    if (Test-Path $outFile) { continue }
+    try {
+      $sName = Invoke-RestMethod -Uri "https://app.testsigma.com/api/v2/test_suites/$sid" -Method Get -Headers $headers
+      ($sName | ConvertTo-Json -Depth 10) | Set-Content -Path $outFile
+    } catch { $failures++ }
+    Start-Sleep -Seconds $pacing
   }
 }
 
 <span class="c"># --- CASE (ids shared with STEP) ---</span>
 $caseIds = @()
-<span class="k">if</span> ($levels -contains <span class="s">"CASE"</span> -or $levels -contains <span class="s">"STEP"</span>) {
-  <span class="k">if</span> ($env:TS_CASE_RESULT_IDS) {
-    $caseIds = $env:TS_CASE_RESULT_IDS -split <span class="s">","</span> | ForEach-Object { $_.Trim() }
-    <span class="k">if</span> ($levels -contains <span class="s">"CASE"</span>) {
-      <span class="k">foreach</span> ($cid <span class="k">in</span> $caseIds) {
-        <span class="k">try</span> {
+if ($levels -contains "CASE" -or $levels -contains "STEP") {
+  if ($env:TS_CASE_RESULT_IDS) {
+    $caseIds = $env:TS_CASE_RESULT_IDS -split "," | ForEach-Object { $_.Trim() }
+    if ($levels -contains "CASE") {
+      foreach ($cid in $caseIds) {
+        try {
           $c = Invoke-RestMethod -Uri "https://app.testsigma.com/api/v2/test_runs/$runId/test_case_results/$cid" -Method Get -Headers $headers
           ($c | ConvertTo-Json -Depth 10) | Set-Content -Path "$reportDir\${runId}_case_$cid.json"
-        } <span class="k">catch</span> { $failures++ }
+        } catch { $failures++ }
         Start-Sleep -Seconds $pacing
       }
     }
-  } <span class="k">else</span> {
-    Write-Host <span class="s">"[INFO] Auto-discovering CASE ids..."</span>
+  } else {
+    Write-Host "[INFO] Auto-discovering CASE ids..."
     $caseIds = Get-TsPaginatedIds "https://app.testsigma.com/api/v2/test_runs/$runId/test_case_results" "$reportDir\${runId}_case_"
-    <span class="k">if</span> ($levels -contains <span class="s">"CASE"</span>) { Write-Host <span class="s">"[OK] CASE -&gt; $($caseIds.Count) result(s) auto-discovered"</span> }
+    if ($levels -contains "CASE") { Write-Host "[OK] CASE -&gt; $($caseIds.Count) result(s) auto-discovered" }
+  }
+
+<span class="c">  # --- CASE NAMES: dedup by testCaseId. This response embeds live</span>
+<span class="c">  # credentials -- extract "name" only, never persist the raw response. ---</span>
+  if ($levels -contains "CASE") {
+    Write-Host "[INFO] Resolving CASE names..."
+    $caseIdsForNames = @()
+    Get-ChildItem -Path $reportDir -Filter "${runId}_case_*.json" -ErrorAction SilentlyContinue | ForEach-Object {
+      try {
+        $item = Get-Content $_.FullName -Raw | ConvertFrom-Json
+        if ($item.testCaseId) { $caseIdsForNames += $item.testCaseId }
+      } catch { }
+    }
+    $caseIdsForNames = $caseIdsForNames | Select-Object -Unique
+    foreach ($tcid in $caseIdsForNames) {
+      $outFile = "$reportDir\${runId}_casename_$tcid.json"
+      if (Test-Path $outFile) { continue }
+      try {
+        $tc = Invoke-RestMethod -Uri "https://app.testsigma.com/api/v1/test_cases/$tcid" -Method Get -Headers $headers
+        @{ id = $tcid; name = $tc.name } | ConvertTo-Json | Set-Content -Path $outFile
+      } catch { $failures++ }
+      Start-Sleep -Seconds $pacing
+    }
   }
 }
 
 <span class="c"># --- STEP ---</span>
-<span class="k">if</span> ($levels -contains <span class="s">"STEP"</span> -and $caseIds.Count -gt 0) {
-  Write-Host <span class="s">"[INFO] Fetching STEP level for each case result..."</span>
-  <span class="k">foreach</span> ($cid <span class="k">in</span> $caseIds) {
-    <span class="k">try</span> {
+if ($levels -contains "STEP" -and $caseIds.Count -gt 0) {
+  Write-Host "[INFO] Fetching STEP level for each case result..."
+  foreach ($cid in $caseIds) {
+    try {
       $steps = Invoke-RestMethod -Uri "https://app.testsigma.com/api/v2/test_runs/$runId/test_case_results/$cid/step_results?page=0&amp;size=100" -Method Get -Headers $headers
       ($steps | ConvertTo-Json -Depth 10) | Set-Content -Path "$reportDir\${runId}_step_$cid.json"
-    } <span class="k">catch</span> { $failures++ }
+    } catch { $failures++ }
     Start-Sleep -Seconds $pacing
   }
 }
 
-Write-Host <span class="s">"[INFO] fetch-report.ps1 complete with $failures failure(s)."</span>
-<span class="k">exit</span> $(<span class="k">if</span> ($failures -gt 0) { 1 } <span class="k">else</span> { 0 })</pre>
+Write-Host "[INFO] fetch-report.ps1 complete with $failures failure(s)."
+exit $(if ($failures -gt 0) { 1 } else { 0 })</pre>
     </div></div>
     </div><!-- /win-only -->
     <div class="mac-only">
     <div class="step"><div class="step-num">18</div><div class="step-body">
       <p>Save as <code>generate-html-report.py</code> — one implementation, called by both OS wrappers below (Testsigma's JSON shape doesn't depend on the OS, so there's no reason to maintain two copies of this one):</p>
-      <pre><span class="c">#!/usr/bin/env python3
-# -------------------------------------------------------------
-# generate-html-report.py
-# Reads every *_plan.json / *_suite_*.json / *_case_*.json /
-# *_step_*.json in REPORT_DIR and renders one self-contained,
-# offline-readable HTML file: ts-report.html in the same folder.
-# Plan Summary leads in plain English; everything else sits one
-# click away behind native &lt;details&gt; elements -- no JS framework,
-# no external assets, works the same offline as everything else
-# in this pipeline.
-# -------------------------------------------------------------</span>
-<span class="k">import</span> json, os, glob, html, sys
+      <pre><span class="c">#!/usr/bin/env python3</span>
+<span class="c"># -------------------------------------------------------------</span>
+<span class="c"># generate-html-report.py</span>
+<span class="c"># Reads every *_plan.json / *_suite_*.json / *_case_*.json /</span>
+<span class="c"># *_step_*.json / *_suitename_*.json / *_casename_*.json in</span>
+<span class="c"># REPORT_DIR and renders one self-contained, offline-readable</span>
+<span class="c"># HTML dashboard: ts-report.html in the same folder. No JS</span>
+<span class="c"># framework, no external assets.</span>
+<span class="c">#</span>
+<span class="c"># Suite/Case result objects only carry suiteId/testCaseId (a</span>
+<span class="c"># reference), not a name -- the name lookup files fetch-report.sh</span>
+<span class="c"># writes separately supply that, keyed by the catalog ID, not the</span>
+<span class="c"># result's own id. If a lookup file is missing (name resolution</span>
+<span class="c"># failed, or an older fetch-report.sh ran without it), this falls</span>
+<span class="c"># back to showing "Suite ID &lt;n&gt;" / "Case ID &lt;n&gt;" rather than a bare</span>
+<span class="c"># blank or a crash.</span>
+<span class="c">#</span>
+<span class="c"># Field lookups elsewhere are defensive for the same reason as</span>
+<span class="c"># before: Testsigma's shape isn't officially documented, and</span>
+<span class="c"># result values are shown as-is even when unrecognized rather than</span>
+<span class="c"># hidden or silently coerced.</span>
+<span class="c"># -------------------------------------------------------------</span>
+import json, os, glob, html, sys
 
-report_dir = os.environ.get(<span class="s">"REPORT_DIR"</span>, <span class="s">"./ts-reports"</span>)
+report_dir = os.environ.get("REPORT_DIR", "./ts-reports")
 
-<span class="k">def</span> load(pattern):
+
+def load(pattern):
     out = []
-    <span class="k">for</span> path <span class="k">in</span> sorted(glob.glob(os.path.join(report_dir, pattern))):
-        <span class="k">try</span>:
-            <span class="k">with</span> open(path) <span class="k">as</span> f:
+    for path in sorted(glob.glob(os.path.join(report_dir, pattern))):
+        try:
+            with open(path) as f:
                 out.append((path, json.load(f)))
-        <span class="k">except</span> (json.JSONDecodeError, OSError) <span class="k">as</span> e:
-            print(<span class="s">f"[WARN] Could not read {path}: {e}"</span>, file=sys.stderr)
-    <span class="k">return</span> out
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"[WARN] Could not read {path}: {e}", file=sys.stderr)
+    return out
 
-plan_files  = load(<span class="s">"*_plan.json"</span>)
-suite_files = load(<span class="s">"*_suite_*.json"</span>)
-case_files  = load(<span class="s">"*_case_*.json"</span>)
-step_files  = load(<span class="s">"*_step_*.json"</span>)
 
-<span class="k">def</span> esc(v):
-    <span class="k">return</span> html.escape(str(v)) <span class="k">if</span> v <span class="k">is not</span> None <span class="k">else</span> <span class="s">""</span>
+plan_files = load("*_plan.json")
+suite_files = load("*_suite_*.json")
+case_files = load("*_case_*.json")
+step_files = load("*_step_*.json")
+suitename_files = load("*_suitename_*.json")
+casename_files = load("*_casename_*.json")
 
-plan = plan_files[0][1] <span class="k">if</span> plan_files <span class="k">else</span> {}
-summary_rows = <span class="s">""</span>.join(
-    <span class="s">f"&lt;tr&gt;&lt;td&gt;{esc(k)}&lt;/td&gt;&lt;td&gt;{esc(plan.get(k))}&lt;/td&gt;&lt;/tr&gt;"</span>
-    <span class="k">for</span> k <span class="k">in</span> [<span class="s">"result"</span>,<span class="s">"duration"</span>,<span class="s">"startTime"</span>,<span class="s">"endTime"</span>,<span class="s">"triggeredBy"</span>,<span class="s">"buildNo"</span>,
-              <span class="s">"totalPassedCount"</span>,<span class="s">"totalFailedCount"</span>,<span class="s">"totalSkippedCount"</span>] <span class="k">if</span> k <span class="k">in</span> plan
-)
 
-<span class="k">def</span> table(files, cols, label):
-    <span class="k">if not</span> files:
-        <span class="k">return</span> <span class="s">f"&lt;p&gt;No {label} results fetched.&lt;/p&gt;"</span>
-    head = <span class="s">""</span>.join(<span class="s">f"&lt;th&gt;{esc(c)}&lt;/th&gt;"</span> <span class="k">for</span> c <span class="k">in</span> cols)
+def esc(v):
+    return html.escape(str(v)) if v is not None else ""
+
+
+def dig(obj, *candidates):
+    """First present, non-empty value among several candidate keys,
+    checked at the object's top level and inside a nested 'metrics'
+    dict if present. Returns None if nothing matches."""
+    if not isinstance(obj, dict):
+        return None
+    metrics = obj.get("metrics") if isinstance(obj.get("metrics"), dict) else {}
+    for key in candidates:
+        v = obj.get(key)
+        if v not in (None, ""):
+            return v
+        v = metrics.get(key)
+        if v not in (None, ""):
+            return v
+    return None
+
+
+def as_number(v):
+    return v if isinstance(v, (int, float)) else None
+
+
+def format_duration(value):
+    if value is None:
+        return None
+    try:
+        ms = int(value)
+    except (ValueError, TypeError):
+        return esc(value)
+    if ms &lt;= 0:
+        return "0s"
+    total_seconds = ms // 1000
+    hours, rem = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if seconds or not parts:
+        parts.append(f"{seconds}s")
+    return " ".join(parts)
+
+
+<span class="c"># Result vocabulary is not exhaustive by design -- anything outside these</span>
+<span class="c"># sets is still rendered, with its own raw text, rather than dropped.</span>
+PASS_WORDS = {"passed", "pass", "success", "succeeded"}
+FAIL_WORDS = {"failed", "failure", "fail", "error"}
+STOP_WORDS = {"stopped", "aborted", "cancelled", "canceled"}
+SKIP_WORDS = {"skipped", "not_executed", "notexecuted", "not_started", "notstarted"}
+PROGRESS_WORDS = {"running", "pending", "queued", "in_progress", "inprogress",
+                   "scheduled", "initiated", "started", "waiting"}
+
+MUTED = '&lt;span class="muted"&gt;-&lt;/span&gt;'
+
+
+def result_word(result):
+    return str(result).strip().lower() if result else ""
+
+
+def is_fail(result):
+    return result_word(result) in FAIL_WORDS
+
+
+def badge(result):
+    if result is None or result == "":
+        return '&lt;span class="badge badge-unknown"&gt;&amp;mdash;&lt;/span&gt;'
+    r = result_word(result)
+    label = esc(result)
+    if r in PASS_WORDS:
+        return f'&lt;span class="badge badge-pass"&gt;&amp;#10003; {label}&lt;/span&gt;'
+    if r in FAIL_WORDS:
+        return f'&lt;span class="badge badge-fail"&gt;&amp;#10007; {label}&lt;/span&gt;'
+    if r in STOP_WORDS:
+        return f'&lt;span class="badge badge-stop"&gt;&amp;#9632; {label}&lt;/span&gt;'
+    if r in SKIP_WORDS:
+        return f'&lt;span class="badge badge-skip"&gt;&amp;ndash; {label}&lt;/span&gt;'
+    if r in PROGRESS_WORDS:
+        return f'&lt;span class="badge badge-progress"&gt;&amp;hellip; {label}&lt;/span&gt;'
+    return f'&lt;span class="badge badge-unknown"&gt;? {label}&lt;/span&gt;'
+
+
+def cell(v):
+    return esc(v) if v is not None else MUTED
+
+
+<span class="c"># --- Name lookups: keyed by the catalog ID (suiteId / testCaseId), not the</span>
+<span class="c"># result object's own id -- fetch-report.sh writes these as small, separate</span>
+<span class="c"># files precisely so the Case lookup's large/sensitive raw response never</span>
+<span class="c"># has to be kept around here either. ---</span>
+suite_name_by_id = {}
+for _, item in suitename_files:
+    sid = item.get("id")
+    if sid is not None:
+        suite_name_by_id[str(sid)] = item.get("name")
+
+case_name_by_id = {}
+for _, item in casename_files:
+    cid = item.get("id")
+    if cid is not None:
+        case_name_by_id[str(cid)] = item.get("name")
+
+plan = plan_files[0][1] if plan_files else {}
+
+plan_result = dig(plan, "result", "latestResult", "status")
+plan_duration = dig(plan, "duration", "consolidatedDuration")
+plan_start = dig(plan, "startTime", "start_time")
+plan_end = dig(plan, "endTime", "end_time")
+plan_build = dig(plan, "buildNo", "build_no", "buildNumber")
+plan_triggered_by = dig(plan, "triggeredBy", "executedBy", "triggered_by")
+plan_triggered_type = dig(plan, "triggeredType", "triggered_type")
+plan_total = as_number(dig(plan, "totalCount", "consolidatedPlanTotalCount"))
+plan_passed = as_number(dig(plan, "totalPassedCount", "passedCount", "consolidatedPlanPassedCount"))
+plan_failed = as_number(dig(plan, "totalFailedCount", "failedCount", "consolidatedPlanFailedCount"))
+plan_stopped = as_number(dig(plan, "stoppedCount", "consolidatedPlanStoppedCount"))
+plan_skipped = as_number(dig(plan, "totalSkippedCount", "notExecutedCount", "consolidatedPlanNotExecutedCount"))
+plan_running = as_number(dig(plan, "runningCount", "consolidatedPlanRunningCount")) or 0
+plan_queued = as_number(dig(plan, "queuedCount", "consolidatedPlanQueuedCount")) or 0
+plan_execution_details = dig(plan, "executionDetails", "execution_details")
+
+
+<span class="c"># --- Incomplete-plan banner: the Plan's own metrics say something is still</span>
+<span class="c"># running/queued. Distinct from a script bug -- Testsigma's v1 (run) and v2</span>
+<span class="c"># (Plan) resources can genuinely disagree on timing; poll-status.sh's own</span>
+<span class="c"># completion check narrows this a lot, but a report can still be generated</span>
+<span class="c"># by hand against an in-progress run, so the report itself stays honest</span>
+<span class="c"># about it either way. ---</span>
+plan_incomplete = plan_running &gt; 0 or plan_queued &gt; 0
+incomplete_banner_html = ""
+if plan_incomplete:
+    incomplete_banner_html = (
+        '&lt;div class="banner banner-warn"&gt;&amp;#9888; This report was captured while the Plan was still '
+        f'in progress ({int(plan_running)} running, {int(plan_queued)} queued) &amp;mdash; '
+        'results below are a partial snapshot, not final.&lt;/div&gt;'
+    )
+
+<span class="c"># --- Failure count, shown next to the Result badge regardless of what the</span>
+<span class="c"># overall Result value says -- so a failure is never hidden behind an</span>
+<span class="c"># in-progress or otherwise ambiguous overall status. ---</span>
+failure_count_html = ""
+if plan_failed:
+    failure_count_html = (
+        f'&lt;span class="failure-count"&gt;{int(plan_failed)} failure{"s" if plan_failed != 1 else ""}&lt;/span&gt;'
+    )
+
+
+def cell_or_dash(v):
+    return esc(v) if v is not None else MUTED
+
+
+<span class="c"># --- Summary pass/fail bar: pure CSS, no chart library ---</span>
+counts = [
+    ("Passed", plan_passed, "seg-pass"),
+    ("Failed", plan_failed, "seg-fail"),
+    ("Stopped", plan_stopped, "seg-stop"),
+    ("Skipped", plan_skipped, "seg-skip"),
+    ("Running", plan_running, "seg-progress"),
+    ("Queued", plan_queued, "seg-progress"),
+]
+numeric_counts = [(label, int(v), cls) for label, v, cls in counts if isinstance(v, (int, float)) and v]
+total_for_bar = sum(v for _, v, _ in numeric_counts)
+if not total_for_bar and plan_total:
+    total_for_bar = int(plan_total)
+
+segments_html = ""
+legend_html = ""
+if total_for_bar and numeric_counts:
+    for label, v, cls in numeric_counts:
+        pct = (v / total_for_bar) * 100
+        segments_html += f'&lt;div class="seg {cls}" style="width:{pct:.2f}%" title="{esc(label)}: {v}"&gt;&lt;/div&gt;'
+        legend_html += (f'&lt;span class="legend-item"&gt;&lt;span class="legend-swatch {cls}"&gt;&lt;/span&gt;'
+                         f'{esc(label)}: {v}&lt;/span&gt;')
+else:
+    segments_html = '&lt;div class="seg seg-unknown" style="width:100%"&gt;&lt;/div&gt;'
+    legend_html = '&lt;span class="legend-item"&gt;No pass/fail count data available on this Plan object.&lt;/span&gt;'
+
+<span class="c"># --- Local cross-check: tally CASE results ourselves and only mention it</span>
+<span class="c"># if it disagrees with what the Plan object itself reports -- on the</span>
+<span class="c"># common case (they agree), this stays silent rather than adding noise. ---</span>
+RESULT_KEYS = ("result", "status", "latestResult")
+DURATION_KEYS = ("duration", "executionDuration", "consolidatedDuration")
+
+local_case_passed = sum(1 for _, item in case_files if result_word(dig(item, *RESULT_KEYS)) in PASS_WORDS)
+local_case_failed = sum(1 for _, item in case_files if is_fail(dig(item, *RESULT_KEYS)))
+mismatch_html = ""
+if case_files and plan_passed is not None and plan_failed is not None:
+    if local_case_passed != int(plan_passed) or local_case_failed != int(plan_failed):
+        mismatch_html = (
+            '&lt;div class="banner banner-info"&gt;Note: tallying the '
+            f'{len(case_files)} fetched Case results directly gives '
+            f'{local_case_passed} passed / {local_case_failed} failed, which does not '
+            f'match the Plan object\'s own count ({int(plan_passed)} passed / {int(plan_failed)} failed). '
+            'This can happen if not every Case result was fetched (see TS_REPORT_LEVELS), or if the Plan '
+            'was still updating when this report was generated.&lt;/div&gt;'
+        )
+
+<span class="c"># --- Suite / Case tables: real names come from the lookup files, keyed by</span>
+<span class="c"># the catalog ID (suiteId / testCaseId) referenced on the result object --</span>
+<span class="c"># NOT the result's own id, which is a different, per-run number. ---</span>
+SUITE_ID_FIELD = ("suiteId",)
+CASE_ID_FIELD = ("testCaseId",)
+
+
+def entity_table(files, label, catalog_id_field, name_lookup, id_label):
+    if not files:
+        return f'&lt;p class="empty-note"&gt;No {esc(label)} results fetched.&lt;/p&gt;'
     rows = []
-    <span class="k">for</span> _, item <span class="k">in</span> files:
-        cells = <span class="s">""</span>.join(<span class="s">f"&lt;td&gt;{esc(item.get(c))}&lt;/td&gt;"</span> <span class="k">for</span> c <span class="k">in</span> cols)
-        rows.append(<span class="s">f"&lt;tr&gt;{cells}&lt;/tr&gt;"</span>)
-    <span class="k">return</span> <span class="s">f"&lt;table&gt;&lt;thead&gt;&lt;tr&gt;{head}&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;{''.join(rows)}&lt;/tbody&gt;&lt;/table&gt;"</span>
+    for _, item in files:
+        eid = dig(item, "id")
+        catalog_id = dig(item, *catalog_id_field)
+        result = dig(item, *RESULT_KEYS)
+        duration = format_duration(dig(item, *DURATION_KEYS))
+        name = name_lookup.get(str(catalog_id)) if catalog_id is not None else None
+        if name:
+            name_html = esc(name)
+        elif catalog_id is not None:
+            name_html = f'&lt;span class="muted"&gt;({esc(id_label)} {esc(catalog_id)})&lt;/span&gt;'
+        else:
+            name_html = '&lt;span class="muted"&gt;(name unavailable)&lt;/span&gt;'
+        rows.append(
+            f"&lt;tr&gt;&lt;td&gt;{cell(eid)}&lt;/td&gt;&lt;td&gt;{name_html}&lt;/td&gt;"
+            f"&lt;td&gt;{badge(result)}&lt;/td&gt;&lt;td&gt;{cell_or_dash(duration)}&lt;/td&gt;&lt;/tr&gt;"
+        )
+    return (
+        '&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;ID&lt;/th&gt;&lt;th&gt;Name&lt;/th&gt;&lt;th&gt;Result&lt;/th&gt;&lt;th&gt;Duration&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;'
+        f'&lt;tbody&gt;{"".join(rows)}&lt;/tbody&gt;&lt;/table&gt;'
+    )
 
-suite_html = table(suite_files, [<span class="s">"id"</span>,<span class="s">"name"</span>,<span class="s">"result"</span>,<span class="s">"duration"</span>], <span class="s">"SUITE"</span>)
-case_html  = table(case_files,  [<span class="s">"id"</span>,<span class="s">"name"</span>,<span class="s">"result"</span>,<span class="s">"duration"</span>], <span class="s">"CASE"</span>)
+
+suite_html = entity_table(suite_files, "SUITE", SUITE_ID_FIELD, suite_name_by_id, "Suite ID")
+case_html = entity_table(case_files, "CASE", CASE_ID_FIELD, case_name_by_id, "Case ID")
+
+<span class="c"># --- Step results, collapsible per case. Steps are numbered sequentially</span>
+<span class="c"># in fetch order (Step 1, Step 2, ...) rather than showing Testsigma's raw</span>
+<span class="c"># UUID inline -- the UUID is kept as a hover tooltip in case it's ever</span>
+<span class="c"># needed for a support ticket or API lookup, just not in the visible cell.</span>
+<span class="c"># A case auto-expands only if it (or one of its steps) failed, so a</span>
+<span class="c"># passing run stays collapsed and a failing one opens exactly where you'd</span>
+<span class="c"># need to look. ---</span>
+STEP_NAME_KEYS = ("name", "description", "stepName", "action", "keyword", "title")
+
+case_lookup = {}
+for _, case_item in case_files:
+    cid = dig(case_item, "id")
+    if cid is not None:
+        case_lookup[str(cid)] = case_item
 
 step_sections = []
-<span class="k">for</span> path, payload <span class="k">in</span> step_files:
-    case_id = os.path.basename(path).split(<span class="s">"_step_"</span>)[-1].replace(<span class="s">".json"</span>, <span class="s">""</span>)
-    steps = payload.get(<span class="s">"content"</span>, payload <span class="k">if</span> isinstance(payload, list) <span class="k">else</span> [])
-    rows = <span class="s">""</span>.join(
-        <span class="s">f"&lt;tr&gt;&lt;td&gt;{esc(s.get('id'))}&lt;/td&gt;&lt;td&gt;{esc(s.get('name') or s.get('description'))}&lt;/td&gt;&lt;td&gt;{esc(s.get('result'))}&lt;/td&gt;&lt;/tr&gt;"</span>
-        <span class="k">for</span> s <span class="k">in</span> steps <span class="k">if</span> isinstance(s, dict)
+for path, payload in step_files:
+    case_id = os.path.basename(path).split("_step_")[-1].replace(".json", "")
+
+    if isinstance(payload, dict):
+        steps = payload.get("content", [])
+        if not isinstance(steps, list):
+            steps = []
+    elif isinstance(payload, list):
+        steps = payload
+    else:
+        steps = []
+
+    case_item = case_lookup.get(case_id)
+    case_result = dig(case_item, *RESULT_KEYS) if case_item else None
+    case_catalog_id = dig(case_item, *CASE_ID_FIELD) if case_item else None
+    case_name = case_name_by_id.get(str(case_catalog_id)) if case_catalog_id is not None else None
+
+    rows = []
+    any_step_failed = False
+    for idx, s in enumerate(steps, start=1):
+        if not isinstance(s, dict):
+            continue
+        s_name = dig(s, *STEP_NAME_KEYS)
+        s_result = dig(s, *RESULT_KEYS)
+        if is_fail(s_result):
+            any_step_failed = True
+        step_uuid = dig(s, "id")
+        name_html = esc(s_name) if s_name else '&lt;span class="muted"&gt;(step name not found)&lt;/span&gt;'
+        tooltip_attr = f' title="Step ID: {esc(step_uuid)}"' if step_uuid else ""
+        rows.append(f"&lt;tr&gt;&lt;td{tooltip_attr}&gt;{idx}&lt;/td&gt;&lt;td&gt;{name_html}&lt;/td&gt;&lt;td&gt;{badge(s_result)}&lt;/td&gt;&lt;/tr&gt;")
+
+    heading = f"Case {esc(case_id)}"
+    if case_name:
+        heading += f" &amp;mdash; {esc(case_name)}"
+    elif case_catalog_id is not None:
+        heading += f" &amp;mdash; Case ID {esc(case_catalog_id)}"
+    count_label = f"{len(rows)} step" + ("" if len(rows) == 1 else "s")
+
+    should_open = any_step_failed or is_fail(case_result)
+    open_attr = " open" if should_open else ""
+
+    body_rows = "".join(rows) or '&lt;tr&gt;&lt;td colspan="3" class="muted"&gt;No steps recorded.&lt;/td&gt;&lt;/tr&gt;'
+    step_sections.append(
+        f'&lt;details class="case-details"{open_attr}&gt;'
+        f'&lt;summary&gt;&lt;span class="case-heading"&gt;{heading}&lt;/span&gt; {badge(case_result) if case_result else ""} '
+        f'&lt;span class="step-count"&gt;({count_label})&lt;/span&gt;&lt;/summary&gt;'
+        '&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;Step&lt;/th&gt;&lt;th&gt;Name&lt;/th&gt;&lt;th&gt;Result&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;'
+        f'&lt;tbody&gt;{body_rows}&lt;/tbody&gt;&lt;/table&gt;'
+        '&lt;/details&gt;'
     )
-    step_sections.append(<span class="s">f"&lt;h4&gt;Case {esc(case_id)}&lt;/h4&gt;&lt;table&gt;&lt;thead&gt;&lt;tr&gt;&lt;th&gt;Step ID&lt;/th&gt;&lt;th&gt;Name&lt;/th&gt;&lt;th&gt;Result&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;&lt;tbody&gt;{rows}&lt;/tbody&gt;&lt;/table&gt;"</span>)
 
-raw_dump = json.dumps({<span class="s">"plan"</span>: plan}, indent=2)
+<span class="c"># --- Run Configuration: collapsible, from executionDetails. Free -- data</span>
+<span class="c"># we already fetch as part of the Plan object, just not previously shown. ---</span>
+run_config_html = '&lt;p class="empty-note"&gt;No execution configuration available.&lt;/p&gt;'
+if isinstance(plan_execution_details, dict) and plan_execution_details:
+    rows = "".join(
+        f"&lt;tr&gt;&lt;td&gt;{esc(k)}&lt;/td&gt;&lt;td&gt;{esc(v)}&lt;/td&gt;&lt;/tr&gt;"
+        for k, v in plan_execution_details.items() if v is not None
+    )
+    run_config_html = f'&lt;table&gt;&lt;tbody&gt;{rows}&lt;/tbody&gt;&lt;/table&gt;'
 
-html_out = <span class="s">f"""&lt;!DOCTYPE html&gt;
+raw_dump = json.dumps({"plan": plan}, indent=2)
+
+html_out = f"""&lt;!DOCTYPE html&gt;
 &lt;html&gt;&lt;head&gt;&lt;meta charset="UTF-8"&gt;&lt;title&gt;Testsigma Run Report&lt;/title&gt;
 &lt;style&gt;
-body {{ font-family: Segoe UI, Arial, sans-serif; padding: 32px; color: #2f2f2f; }}
-table {{ border-collapse: collapse; width: 100%; margin-bottom: 24px; }}
-th, td {{ border: 1px solid #ddd; padding: 6px 10px; font-size: 13px; text-align: left; }}
-th {{ background: #183247; color: #fff; }}
-h1, h2 {{ color: #183247; }}
-details {{ margin: 12px 0; }}
+  :root {{
+    --pass: #1e8e3e; --pass-bg: #e6f4ea;
+    --fail: #c5221f; --fail-bg: #fce8e6;
+    --stop: #b45309; --stop-bg: #fef3c7;
+    --skip: #6b7280; --skip-bg: #f3f4f6;
+    --progress: #1a73e8; --progress-bg: #e8f0fe;
+    --unknown: #6b7280; --unknown-bg: #f3f4f6;
+    --ink: #202124; --line: #e0e0e0; --head: #183247;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{ font-family: -apple-system, 'Segoe UI', Arial, sans-serif; margin: 0; padding: 32px; color: var(--ink); background: #f7f8fa; }}
+  .wrap {{ max-width: 1100px; margin: 0 auto; }}
+  h1 {{ font-size: 22px; color: var(--head); margin: 0 0 4px 0; }}
+  h2 {{ font-size: 16px; color: var(--head); margin: 28px 0 10px 0; }}
+  .card {{ background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 20px 24px; margin-bottom: 20px; }}
+  .banner {{ border-radius: 6px; padding: 10px 16px; margin-bottom: 16px; font-size: 13px; }}
+  .banner-warn {{ background: var(--stop-bg); color: #7a4a06; border: 1px solid #f0c674; }}
+  .banner-info {{ background: var(--progress-bg); color: #1a4d8f; border: 1px solid #a8c7f0; }}
+  .summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px 20px; margin-bottom: 18px; }}
+  .summary-item .label {{ font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; color: #6b7280; margin-bottom: 3px; }}
+  .summary-item .value {{ font-size: 14px; font-weight: 600; }}
+  .failure-count {{ display: inline-block; margin-left: 8px; color: var(--fail); font-weight: 700; font-size: 12.5px; }}
+  .bar {{ display: flex; height: 14px; border-radius: 7px; overflow: hidden; background: var(--skip-bg); margin-bottom: 10px; }}
+  .seg {{ height: 100%; }}
+  .seg-pass {{ background: var(--pass); }}
+  .seg-fail {{ background: var(--fail); }}
+  .seg-stop {{ background: var(--stop); }}
+  .seg-skip {{ background: var(--skip); }}
+  .seg-progress {{ background: var(--progress); }}
+  .seg-unknown {{ background: var(--unknown); }}
+  .legend {{ display: flex; flex-wrap: wrap; gap: 14px; font-size: 12.5px; color: #4b5563; }}
+  .legend-item {{ display: inline-flex; align-items: center; gap: 6px; }}
+  .legend-swatch {{ width: 10px; height: 10px; border-radius: 2px; display: inline-block; }}
+  table {{ border-collapse: collapse; width: 100%; margin-bottom: 8px; }}
+  th, td {{ border-bottom: 1px solid var(--line); padding: 8px 10px; font-size: 13px; text-align: left; vertical-align: middle; }}
+  th {{ background: var(--head); color: #fff; font-weight: 600; font-size: 12px; }}
+  tr:last-child td {{ border-bottom: none; }}
+  .badge {{ display: inline-block; padding: 2px 9px; border-radius: 10px; font-size: 12px; font-weight: 600; white-space: nowrap; }}
+  .badge-pass {{ color: var(--pass); background: var(--pass-bg); }}
+  .badge-fail {{ color: var(--fail); background: var(--fail-bg); }}
+  .badge-stop {{ color: var(--stop); background: var(--stop-bg); }}
+  .badge-skip {{ color: var(--skip); background: var(--skip-bg); }}
+  .badge-progress {{ color: var(--progress); background: var(--progress-bg); }}
+  .badge-unknown {{ color: var(--unknown); background: var(--unknown-bg); }}
+  .muted {{ color: #9ca3af; font-style: italic; }}
+  .empty-note {{ color: #6b7280; font-size: 13px; }}
+  details.case-details {{ background: #fff; border: 1px solid var(--line); border-radius: 6px; margin: 8px 0; padding: 4px 14px; }}
+  details.case-details summary {{ cursor: pointer; padding: 10px 0; font-weight: 600; font-size: 13.5px; list-style: none; display: flex; align-items: center; gap: 10px; }}
+  details.case-details summary::-webkit-details-marker {{ display: none; }}
+  details.case-details summary::before {{ content: "\\25B8"; color: #9ca3af; }}
+  details.case-details[open] summary::before {{ content: "\\25BE"; }}
+  details.case-details table {{ margin: 4px 0 12px 0; }}
+  .step-count {{ font-weight: 400; color: #6b7280; font-size: 12px; }}
+  details.run-config summary {{ cursor: pointer; color: #4b5563; font-size: 13px; padding: 6px 0; font-weight: 600; }}
+  details.raw-json summary {{ cursor: pointer; color: #6b7280; font-size: 12.5px; padding: 6px 0; }}
+  details.raw-json pre {{ background: #1e1e1e; color: #e8ecf1; padding: 14px; border-radius: 6px; overflow-x: auto; font-size: 11.5px; }}
 &lt;/style&gt;&lt;/head&gt;&lt;body&gt;
-&lt;h1&gt;Testsigma Run Report&lt;/h1&gt;
-&lt;h2&gt;Plan Summary&lt;/h2&gt;
-&lt;table&gt;{summary_rows}&lt;/table&gt;
-&lt;h2&gt;Suite Results&lt;/h2&gt;{suite_html}
-&lt;h2&gt;Case Results&lt;/h2&gt;{case_html}
-&lt;h2&gt;Step Results&lt;/h2&gt;{''.join(step_sections) or '&lt;p&gt;No STEP results fetched.&lt;/p&gt;'}
-&lt;details&gt;&lt;summary&gt;Raw plan JSON&lt;/summary&gt;&lt;pre&gt;{esc(raw_dump)}&lt;/pre&gt;&lt;/details&gt;
-&lt;/body&gt;&lt;/html&gt;"""</span>
+&lt;div class="wrap"&gt;
+  &lt;h1&gt;Testsigma Run Report&lt;/h1&gt;
+  {incomplete_banner_html}
 
-out_path = os.path.join(report_dir, <span class="s">"ts-report.html"</span>)
-<span class="k">with</span> open(out_path, <span class="s">"w"</span>) <span class="k">as</span> f:
+  &lt;div class="card"&gt;
+    &lt;div class="summary-grid"&gt;
+      &lt;div class="summary-item"&gt;&lt;div class="label"&gt;Result&lt;/div&gt;&lt;div class="value"&gt;{badge(plan_result)}{failure_count_html}&lt;/div&gt;&lt;/div&gt;
+      &lt;div class="summary-item"&gt;&lt;div class="label"&gt;Duration&lt;/div&gt;&lt;div class="value"&gt;{cell_or_dash(format_duration(plan_duration))}&lt;/div&gt;&lt;/div&gt;
+      &lt;div class="summary-item"&gt;&lt;div class="label"&gt;Build&lt;/div&gt;&lt;div class="value"&gt;{cell_or_dash(plan_build)}&lt;/div&gt;&lt;/div&gt;
+      &lt;div class="summary-item"&gt;&lt;div class="label"&gt;Triggered By&lt;/div&gt;&lt;div class="value"&gt;{cell_or_dash(plan_triggered_by)}&lt;/div&gt;&lt;/div&gt;
+      &lt;div class="summary-item"&gt;&lt;div class="label"&gt;Triggered Via&lt;/div&gt;&lt;div class="value"&gt;{cell_or_dash(plan_triggered_type)}&lt;/div&gt;&lt;/div&gt;
+      &lt;div class="summary-item"&gt;&lt;div class="label"&gt;Start Time&lt;/div&gt;&lt;div class="value"&gt;{cell_or_dash(plan_start)}&lt;/div&gt;&lt;/div&gt;
+      &lt;div class="summary-item"&gt;&lt;div class="label"&gt;End Time&lt;/div&gt;&lt;div class="value"&gt;{cell_or_dash(plan_end)}&lt;/div&gt;&lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class="bar"&gt;{segments_html}&lt;/div&gt;
+    &lt;div class="legend"&gt;{legend_html}&lt;/div&gt;
+  &lt;/div&gt;
+  {mismatch_html}
+
+  &lt;h2&gt;Suite Results&lt;/h2&gt;
+  &lt;div class="card"&gt;{suite_html}&lt;/div&gt;
+
+  &lt;h2&gt;Case Results&lt;/h2&gt;
+  &lt;div class="card"&gt;{case_html}&lt;/div&gt;
+
+  &lt;h2&gt;Step Results&lt;/h2&gt;
+  {"".join(step_sections) or '&lt;p class="empty-note"&gt;No STEP results fetched.&lt;/p&gt;'}
+
+  &lt;details class="run-config"&gt;&lt;summary&gt;Run Configuration&lt;/summary&gt;&lt;div class="card"&gt;{run_config_html}&lt;/div&gt;&lt;/details&gt;
+  &lt;details class="raw-json"&gt;&lt;summary&gt;Raw plan JSON (for anything not shown above)&lt;/summary&gt;&lt;pre&gt;{esc(raw_dump)}&lt;/pre&gt;&lt;/details&gt;
+&lt;/div&gt;
+&lt;/body&gt;&lt;/html&gt;"""
+
+out_path = os.path.join(report_dir, "ts-report.html")
+with open(out_path, "w") as f:
     f.write(html_out)
-print(<span class="s">f"[OK] Report written to {out_path}"</span>)</pre>
+print(f"[OK] Report written to {out_path}")</pre>
     </div></div>
     <div class="step"><div class="step-num">19</div><div class="step-body">
       <p>Save as <code>generate-html-report.sh</code> — thin wrapper so the Mac pipeline step calls a shell script like every other step:</p>
