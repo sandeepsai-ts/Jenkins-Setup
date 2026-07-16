@@ -635,9 +635,18 @@ Write-Host <span class="s">"[INFO] Run ID saved to: $runIdFile"</span></pre>
 # Polls Testsigma until the run reaches a terminal status, or
 # (optionally) a safety-cap timeout elapses -- whichever comes
 # first. Toggle the cap via MAX_WAIT_MINUTES without editing this file.
+# Even when the cap is disabled ("unbounded"/"none"/0), an absolute
+# ceiling (ABSOLUTE_MAX_WAIT_MINUTES, default 1440 = 24h) still applies,
+# so this script can never loop truly forever. It also fails safe if
+# Testsigma ever returns a result value outside the known terminal
+# list on two consecutive polls, rather than hanging on an unrecognized
+# status until a timeout eventually fires.
 #
 # Required: TS_API_TOKEN, RUN_ID_FILE
-# Optional: MAX_WAIT_MINUTES (default: 240 = 4h; 0/"unbounded"/"none" disables it),
+# Optional: MAX_WAIT_MINUTES (default: 240 = 4h; 0/"unbounded"/"none" disables
+#             the normal cap in favor of the absolute ceiling below),
+#           ABSOLUTE_MAX_WAIT_MINUTES (default: 1440 = 24h; last-resort
+#             ceiling that applies even when MAX_WAIT_MINUTES is unbounded),
 #           POLL_INTERVAL_SECONDS (default: 30),
 #           MAX_CONSECUTIVE_HTTP_FAILURES (default: 10)
 # -------------------------------------------------------------</span>
@@ -649,6 +658,7 @@ Write-Host <span class="s">"[INFO] Run ID saved to: $runIdFile"</span></pre>
 RUN_ID_FILE="${RUN_ID_FILE:-/tmp/ts_run_id_manual-run}"
 POLL_INTERVAL="${POLL_INTERVAL_SECONDS:-30}"
 MAX_HTTP_FAILURES="${MAX_CONSECUTIVE_HTTP_FAILURES:-10}"
+ABSOLUTE_MAX_MINUTES="${ABSOLUTE_MAX_WAIT_MINUTES:-1440}"
 
 <span class="k">if</span> [[ -z <span class="s">"${TS_API_TOKEN:-}"</span> ]]; <span class="k">then</span>
   <span class="fn">echo</span> <span class="s">"[ERROR] TS_API_TOKEN is not set."</span>; <span class="k">exit</span> 1
@@ -661,23 +671,33 @@ RUN_ID=$(<span class="fn">cat</span> <span class="s">"$RUN_ID_FILE"</span>)
 RAW_MAX_WAIT="${MAX_WAIT_MINUTES:-240}"
 RAW_MAX_WAIT_LC=$(<span class="fn">echo</span> <span class="s">"$RAW_MAX_WAIT"</span> | <span class="fn">tr</span> '[:upper:]' '[:lower:]')
 <span class="k">if</span> [[ -z <span class="s">"$RAW_MAX_WAIT"</span> || <span class="s">"$RAW_MAX_WAIT_LC"</span> == <span class="s">"0"</span> || <span class="s">"$RAW_MAX_WAIT_LC"</span> == <span class="s">"unbounded"</span> || <span class="s">"$RAW_MAX_WAIT_LC"</span> == <span class="s">"none"</span> ]]; <span class="k">then</span>
-  CAP_ENABLED=false; MAX_SECONDS=0
-  <span class="fn">echo</span> <span class="s">"[INFO] MAX_WAIT_MINUTES='${RAW_MAX_WAIT}' -&gt; safety cap DISABLED. Polling until terminal status only."</span>
+  CAP_MODE="absolute-ceiling"; MAX_SECONDS=$(( ABSOLUTE_MAX_MINUTES * 60 )); DISPLAY_MAX_MINUTES="$ABSOLUTE_MAX_MINUTES"
+  <span class="fn">echo</span> <span class="s">"[INFO] MAX_WAIT_MINUTES='${RAW_MAX_WAIT}' -&gt; normal safety cap disabled. Polling until terminal status, backstopped by an absolute ceiling of ${ABSOLUTE_MAX_MINUTES} minute(s) (override via ABSOLUTE_MAX_WAIT_MINUTES)."</span>
 <span class="k">else</span>
   <span class="k">if</span> ! [[ <span class="s">"$RAW_MAX_WAIT"</span> =~ ^[0-9]+$ ]]; <span class="k">then</span>
     <span class="fn">echo</span> <span class="s">"[ERROR] MAX_WAIT_MINUTES must be a non-negative integer, 'unbounded', or 'none'. Got: '${RAW_MAX_WAIT}'"</span>; <span class="k">exit</span> 1
   <span class="k">fi</span>
-  CAP_ENABLED=true; MAX_SECONDS=$(( RAW_MAX_WAIT * 60 ))
+  CAP_MODE="normal"; MAX_SECONDS=$(( RAW_MAX_WAIT * 60 )); DISPLAY_MAX_MINUTES="$RAW_MAX_WAIT"
   <span class="fn">echo</span> <span class="s">"[INFO] MAX_WAIT_MINUTES='${RAW_MAX_WAIT}' -&gt; safety cap ENABLED at ${MAX_SECONDS}s."</span>
 <span class="k">fi</span>
 
+<span class="c"># Statuses treated as "still in progress" -- never counted toward the
+# unrecognized-status fail-safe below. UNKNOWN is this script's own
+# placeholder when Testsigma's response has no 'result' field at all.</span>
+IN_PROGRESS_STATUSES=" running pending queued in_progress inprogress scheduled initiated started waiting not_started notstarted unknown "
+
 ELAPSED=0
 CONSECUTIVE_HTTP_FAILURES=0
+LAST_UNRECOGNIZED_LC=""
 <span class="fn">echo</span> <span class="s">"[INFO] Polling Testsigma for Run ID: ${RUN_ID}"</span>
 
 <span class="k">while</span> true; <span class="k">do</span>
-  <span class="k">if</span> [[ <span class="s">"$CAP_ENABLED"</span> == true &amp;&amp; <span class="s">"$ELAPSED"</span> -ge <span class="s">"$MAX_SECONDS"</span> ]]; <span class="k">then</span>
-    <span class="fn">echo</span> <span class="s">"[TIMEOUT] Safety cap of ${RAW_MAX_WAIT} minute(s) reached. Marking build FAILED."</span>
+  <span class="k">if</span> [[ <span class="s">"$ELAPSED"</span> -ge <span class="s">"$MAX_SECONDS"</span> ]]; <span class="k">then</span>
+    <span class="k">if</span> [[ <span class="s">"$CAP_MODE"</span> == <span class="s">"absolute-ceiling"</span> ]]; <span class="k">then</span>
+      <span class="fn">echo</span> <span class="s">"[TIMEOUT] Absolute ceiling of ${DISPLAY_MAX_MINUTES} minute(s) reached (MAX_WAIT_MINUTES was set to '${RAW_MAX_WAIT}'). Marking build FAILED."</span>
+    <span class="k">else</span>
+      <span class="fn">echo</span> <span class="s">"[TIMEOUT] Safety cap of ${DISPLAY_MAX_MINUTES} minute(s) reached. Marking build FAILED."</span>
+    <span class="k">fi</span>
     <span class="fn">echo</span> <span class="s">"[TIMEOUT] Testsigma Run ID ${RUN_ID} is left RUNNING -- this script does not stop it on timeout, by design."</span>
     <span class="k">exit</span> 1
   <span class="k">fi</span>
@@ -702,10 +722,26 @@ CONSECUTIVE_HTTP_FAILURES=0
   <span class="fn">echo</span> <span class="s">"[INFO] Status: ${STATUS} (elapsed ${ELAPSED}s)"</span>
 
   <span class="k">case</span> <span class="s">"$STATUS"</span> <span class="k">in</span>
-    PASSED|FAILED|STOPPED|ERROR|ABORTED)
+    PASSED|FAILED|FAILURE|STOPPED|ERROR|ABORTED)
       <span class="fn">echo</span> <span class="s">"[DONE] Terminal status reached: ${STATUS}"</span>
       <span class="k">exit</span> 0 ;;
   <span class="k">esac</span>
+
+  <span class="c"># Fail-safe: Testsigma's result vocabulary isn't fully documented, and it has
+  # already been observed to diverge from what this list assumed (FAILURE vs
+  # FAILED). If the same unrecognized, non-"in-progress" value shows up on two
+  # consecutive polls, treat it as terminal and fail safe instead of polling
+  # for hours (or, unbounded, forever) on a status this script doesn't know.</span>
+  STATUS_LC=$(<span class="fn">echo</span> <span class="s">"$STATUS"</span> | <span class="fn">tr</span> '[:upper:]' '[:lower:]')
+  <span class="k">if</span> [[ -n <span class="s">"$STATUS"</span> &amp;&amp; <span class="s">"$IN_PROGRESS_STATUSES"</span> != *<span class="s">" ${STATUS_LC} "</span>* ]]; <span class="k">then</span>
+    <span class="k">if</span> [[ <span class="s">"$STATUS_LC"</span> == <span class="s">"$LAST_UNRECOGNIZED_LC"</span> ]]; <span class="k">then</span>
+      <span class="fn">echo</span> <span class="s">"[WARN] Unrecognized status '${STATUS}' seen on two consecutive polls -- treating as terminal (failing safe) rather than waiting for a timeout. Please report this status value so it can be added to the known list."</span>
+      <span class="k">exit</span> 1
+    <span class="k">fi</span>
+    LAST_UNRECOGNIZED_LC="$STATUS_LC"
+  <span class="k">else</span>
+    LAST_UNRECOGNIZED_LC=""
+  <span class="k">fi</span>
 
   <span class="fn">sleep</span> <span class="s">"$POLL_INTERVAL"</span>
   ELAPSED=$(( ELAPSED + POLL_INTERVAL ))
@@ -718,6 +754,10 @@ CONSECUTIVE_HTTP_FAILURES=0
           <p>Save as <code>poll-status.ps1</code>, same folder:</p>
           <pre><span class="c"># -------------------------------------------------------------
 # poll-status.ps1 -- see poll-status.sh header for parameter docs.
+# Even when the normal cap is disabled ("unbounded"/"none"/0), an
+# absolute ceiling (ABSOLUTE_MAX_WAIT_MINUTES, default 1440 = 24h)
+# still applies. Also fails safe if Testsigma returns a result value
+# outside the known terminal list on two consecutive polls.
 # -------------------------------------------------------------</span>
 $ErrorActionPreference = <span class="s">"Continue"</span>
 
@@ -728,24 +768,34 @@ $runId = (Get-Content $runIdFile -Raw).Trim()
 
 $rawMaxWait = <span class="k">if</span> ($env:MAX_WAIT_MINUTES) { $env:MAX_WAIT_MINUTES } <span class="k">else</span> { <span class="s">"240"</span> }
 $rawMaxWaitLc = $rawMaxWait.ToLower()
+$absoluteMaxMinutes = <span class="k">if</span> ($env:ABSOLUTE_MAX_WAIT_MINUTES) { [int]$env:ABSOLUTE_MAX_WAIT_MINUTES } <span class="k">else</span> { 1440 }
 <span class="k">if</span> ($rawMaxWaitLc <span class="k">-in</span> @(<span class="s">"0"</span>, <span class="s">"unbounded"</span>, <span class="s">"none"</span>, <span class="s">""</span>)) {
-  $capEnabled = $false; $maxSeconds = 0
-  Write-Host <span class="s">"[INFO] MAX_WAIT_MINUTES='$rawMaxWait' -&gt; safety cap DISABLED."</span>
+  $capMode = <span class="s">"absolute-ceiling"</span>; $maxSeconds = $absoluteMaxMinutes * 60; $displayMaxMinutes = $absoluteMaxMinutes
+  Write-Host <span class="s">"[INFO] MAX_WAIT_MINUTES='$rawMaxWait' -&gt; normal safety cap disabled. Polling until terminal status, backstopped by an absolute ceiling of $absoluteMaxMinutes minute(s) (override via ABSOLUTE_MAX_WAIT_MINUTES)."</span>
 } <span class="k">else</span> {
   <span class="k">if</span> ($rawMaxWait <span class="k">-notmatch</span> <span class="s">'^[0-9]+$'</span>) { Write-Host <span class="s">"[ERROR] MAX_WAIT_MINUTES must be an integer, 'unbounded', or 'none'."</span>; <span class="k">exit</span> 1 }
-  $capEnabled = $true; $maxSeconds = [int]$rawMaxWait * 60
+  $capMode = <span class="s">"normal"</span>; $maxSeconds = [int]$rawMaxWait * 60; $displayMaxMinutes = $rawMaxWait
   Write-Host <span class="s">"[INFO] MAX_WAIT_MINUTES='$rawMaxWait' -&gt; safety cap ENABLED at ${maxSeconds}s."</span>
 }
+
+<span class="c"># Statuses treated as "still in progress" -- excluded from the
+# unrecognized-status fail-safe below.</span>
+$inProgressStatuses = @(<span class="s">"running"</span>,<span class="s">"pending"</span>,<span class="s">"queued"</span>,<span class="s">"in_progress"</span>,<span class="s">"inprogress"</span>,<span class="s">"scheduled"</span>,<span class="s">"initiated"</span>,<span class="s">"started"</span>,<span class="s">"waiting"</span>,<span class="s">"not_started"</span>,<span class="s">"notstarted"</span>)
 
 $pollInterval = <span class="k">if</span> ($env:POLL_INTERVAL_SECONDS) { [int]$env:POLL_INTERVAL_SECONDS } <span class="k">else</span> { 30 }
 $maxHttpFailures = <span class="k">if</span> ($env:MAX_CONSECUTIVE_HTTP_FAILURES) { [int]$env:MAX_CONSECUTIVE_HTTP_FAILURES } <span class="k">else</span> { 10 }
 $elapsed = 0
 $consecutiveFailures = 0
+$lastUnrecognizedLc = <span class="s">""</span>
 Write-Host <span class="s">"[INFO] Polling Testsigma for Run ID: $runId"</span>
 
 <span class="k">while</span> ($true) {
-  <span class="k">if</span> ($capEnabled -and $elapsed -ge $maxSeconds) {
-    Write-Host <span class="s">"[TIMEOUT] Safety cap of $rawMaxWait minute(s) reached. Failing the build."</span>
+  <span class="k">if</span> ($elapsed -ge $maxSeconds) {
+    <span class="k">if</span> ($capMode -eq <span class="s">"absolute-ceiling"</span>) {
+      Write-Host <span class="s">"[TIMEOUT] Absolute ceiling of $displayMaxMinutes minute(s) reached (MAX_WAIT_MINUTES was set to '$rawMaxWait'). Failing the build."</span>
+    } <span class="k">else</span> {
+      Write-Host <span class="s">"[TIMEOUT] Safety cap of $displayMaxMinutes minute(s) reached. Failing the build."</span>
+    }
     <span class="k">exit</span> 1
   }
   <span class="k">try</span> {
@@ -754,8 +804,20 @@ Write-Host <span class="s">"[INFO] Polling Testsigma for Run ID: $runId"</span>
     $consecutiveFailures = 0
     $status = $resp.result
     Write-Host <span class="s">"[INFO] Status: $status (elapsed ${elapsed}s)"</span>
-    <span class="k">if</span> ($status <span class="k">-in</span> @(<span class="s">"PASSED"</span>,<span class="s">"FAILED"</span>,<span class="s">"STOPPED"</span>,<span class="s">"ERROR"</span>,<span class="s">"ABORTED"</span>)) {
+    <span class="k">if</span> ($status <span class="k">-in</span> @(<span class="s">"PASSED"</span>,<span class="s">"FAILED"</span>,<span class="s">"FAILURE"</span>,<span class="s">"STOPPED"</span>,<span class="s">"ERROR"</span>,<span class="s">"ABORTED"</span>)) {
       Write-Host <span class="s">"[DONE] Terminal status reached: $status"</span>; <span class="k">exit</span> 0
+    }
+    <span class="c"># Fail-safe: same unrecognized non-"in-progress" value on two
+    # consecutive polls is treated as terminal rather than waited out.</span>
+    $statusLc = <span class="k">if</span> ($status) { $status.ToString().ToLower() } <span class="k">else</span> { <span class="s">""</span> }
+    <span class="k">if</span> ($statusLc -and ($inProgressStatuses -notcontains $statusLc)) {
+      <span class="k">if</span> ($statusLc -eq $lastUnrecognizedLc) {
+        Write-Host <span class="s">"[WARN] Unrecognized status '$status' seen on two consecutive polls -- treating as terminal (failing safe) rather than waiting for a timeout. Please report this status value so it can be added to the known list."</span>
+        <span class="k">exit</span> 1
+      }
+      $lastUnrecognizedLc = $statusLc
+    } <span class="k">else</span> {
+      $lastUnrecognizedLc = <span class="s">""</span>
     }
   } <span class="k">catch</span> {
     $consecutiveFailures++
@@ -807,13 +869,30 @@ Write-Host <span class="s">"[INFO] Polling Testsigma for Run ID: $runId"</span>
         def runId = sh(script: <span class="s">'cat "${RUN_ID_FILE}" 2&gt;/dev/null || true'</span>, returnStdout: true).trim()
         <span class="k">if</span> (runId) {
           echo <span class="s">"[ABORT] Jenkins cancelled. Stopping Testsigma Run ID: ${runId}"</span>
+          def stopStatus
           withEnv([<span class="s">"TS_RUN_ID=${runId}"</span>]) {
-            sh <span class="s">'''
-              curl -s -X PUT -H "Authorization: Bearer ${TS_API_TOKEN}" -H "Content-Type: application/json" \\
-                "https://app.testsigma.com/api/v1/execution_results/${TS_RUN_ID}" -d "{\\"result\\":\\"STOPPED\\"}" || echo "[WARN] Stop request failed"
-            '''</span>
+            stopStatus = sh(script: <span class="s">'''
+              TMPFILE=$(mktemp)
+              HTTP_CODE=$(curl -s -o "$TMPFILE" -w "%{http_code}" -X PUT \\
+                -H "Authorization: Bearer ${TS_API_TOKEN}" \\
+                -H "Content-Type: application/json" \\
+                "https://app.testsigma.com/api/v1/execution_results/${TS_RUN_ID}" \\
+                -d "{\\"result\\":\\"STOPPED\\"}")
+              BODY=$(cat "$TMPFILE"); rm -f "$TMPFILE"
+              if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "201" ]]; then
+                echo "[OK] Testsigma acknowledged the stop request (HTTP ${HTTP_CODE})."
+                exit 0
+              else
+                echo "[ERROR] Stop request rejected by Testsigma (HTTP ${HTTP_CODE}): ${BODY}"
+                exit 1
+              fi
+            '''</span>, returnStatus: true)
           }
-          echo <span class="s">"[ABORT] Stop signal sent. Testsigma license freed."</span>
+          <span class="k">if</span> (stopStatus == 0) {
+            echo <span class="s">"[ABORT] Stop signal sent. Testsigma license freed."</span>
+          } <span class="k">else</span> {
+            echo <span class="s">"[ABORT] WARNING: Testsigma did not confirm the stop (see HTTP error above). The run may still be RUNNING and consuming a license seat -- check Testsigma UI."</span>
+          }
         } <span class="k">else</span> {
           echo <span class="s">"[ABORT] No Run ID found -- Testsigma may not have started."</span>
         }
@@ -1115,9 +1194,18 @@ Write-Host <span class="s">"[INFO] Run ID saved to: $runIdFile"</span></pre>
 # Polls Testsigma until the run reaches a terminal status, or
 # (optionally) a safety-cap timeout elapses -- whichever comes
 # first. Toggle the cap via MAX_WAIT_MINUTES without editing this file.
+# Even when the cap is disabled ("unbounded"/"none"/0), an absolute
+# ceiling (ABSOLUTE_MAX_WAIT_MINUTES, default 1440 = 24h) still applies,
+# so this script can never loop truly forever. It also fails safe if
+# Testsigma ever returns a result value outside the known terminal
+# list on two consecutive polls, rather than hanging on an unrecognized
+# status until a timeout eventually fires.
 #
 # Required: TS_API_TOKEN, RUN_ID_FILE
-# Optional: MAX_WAIT_MINUTES (default: 240 = 4h; 0/"unbounded"/"none" disables it),
+# Optional: MAX_WAIT_MINUTES (default: 240 = 4h; 0/"unbounded"/"none" disables
+#             the normal cap in favor of the absolute ceiling below),
+#           ABSOLUTE_MAX_WAIT_MINUTES (default: 1440 = 24h; last-resort
+#             ceiling that applies even when MAX_WAIT_MINUTES is unbounded),
 #           POLL_INTERVAL_SECONDS (default: 30),
 #           MAX_CONSECUTIVE_HTTP_FAILURES (default: 10)
 # -------------------------------------------------------------</span>
@@ -1129,6 +1217,7 @@ Write-Host <span class="s">"[INFO] Run ID saved to: $runIdFile"</span></pre>
 RUN_ID_FILE="${RUN_ID_FILE:-/tmp/ts_run_id_manual-run}"
 POLL_INTERVAL="${POLL_INTERVAL_SECONDS:-30}"
 MAX_HTTP_FAILURES="${MAX_CONSECUTIVE_HTTP_FAILURES:-10}"
+ABSOLUTE_MAX_MINUTES="${ABSOLUTE_MAX_WAIT_MINUTES:-1440}"
 
 <span class="k">if</span> [[ -z <span class="s">"${TS_API_TOKEN:-}"</span> ]]; <span class="k">then</span>
   <span class="fn">echo</span> <span class="s">"[ERROR] TS_API_TOKEN is not set."</span>; <span class="k">exit</span> 1
@@ -1141,23 +1230,33 @@ RUN_ID=$(<span class="fn">cat</span> <span class="s">"$RUN_ID_FILE"</span>)
 RAW_MAX_WAIT="${MAX_WAIT_MINUTES:-240}"
 RAW_MAX_WAIT_LC=$(<span class="fn">echo</span> <span class="s">"$RAW_MAX_WAIT"</span> | <span class="fn">tr</span> '[:upper:]' '[:lower:]')
 <span class="k">if</span> [[ -z <span class="s">"$RAW_MAX_WAIT"</span> || <span class="s">"$RAW_MAX_WAIT_LC"</span> == <span class="s">"0"</span> || <span class="s">"$RAW_MAX_WAIT_LC"</span> == <span class="s">"unbounded"</span> || <span class="s">"$RAW_MAX_WAIT_LC"</span> == <span class="s">"none"</span> ]]; <span class="k">then</span>
-  CAP_ENABLED=false; MAX_SECONDS=0
-  <span class="fn">echo</span> <span class="s">"[INFO] MAX_WAIT_MINUTES='${RAW_MAX_WAIT}' -&gt; safety cap DISABLED. Polling until terminal status only."</span>
+  CAP_MODE="absolute-ceiling"; MAX_SECONDS=$(( ABSOLUTE_MAX_MINUTES * 60 )); DISPLAY_MAX_MINUTES="$ABSOLUTE_MAX_MINUTES"
+  <span class="fn">echo</span> <span class="s">"[INFO] MAX_WAIT_MINUTES='${RAW_MAX_WAIT}' -&gt; normal safety cap disabled. Polling until terminal status, backstopped by an absolute ceiling of ${ABSOLUTE_MAX_MINUTES} minute(s) (override via ABSOLUTE_MAX_WAIT_MINUTES)."</span>
 <span class="k">else</span>
   <span class="k">if</span> ! [[ <span class="s">"$RAW_MAX_WAIT"</span> =~ ^[0-9]+$ ]]; <span class="k">then</span>
     <span class="fn">echo</span> <span class="s">"[ERROR] MAX_WAIT_MINUTES must be a non-negative integer, 'unbounded', or 'none'. Got: '${RAW_MAX_WAIT}'"</span>; <span class="k">exit</span> 1
   <span class="k">fi</span>
-  CAP_ENABLED=true; MAX_SECONDS=$(( RAW_MAX_WAIT * 60 ))
+  CAP_MODE="normal"; MAX_SECONDS=$(( RAW_MAX_WAIT * 60 )); DISPLAY_MAX_MINUTES="$RAW_MAX_WAIT"
   <span class="fn">echo</span> <span class="s">"[INFO] MAX_WAIT_MINUTES='${RAW_MAX_WAIT}' -&gt; safety cap ENABLED at ${MAX_SECONDS}s."</span>
 <span class="k">fi</span>
 
+<span class="c"># Statuses treated as "still in progress" -- never counted toward the
+# unrecognized-status fail-safe below. UNKNOWN is this script's own
+# placeholder when Testsigma's response has no 'result' field at all.</span>
+IN_PROGRESS_STATUSES=" running pending queued in_progress inprogress scheduled initiated started waiting not_started notstarted unknown "
+
 ELAPSED=0
 CONSECUTIVE_HTTP_FAILURES=0
+LAST_UNRECOGNIZED_LC=""
 <span class="fn">echo</span> <span class="s">"[INFO] Polling Testsigma for Run ID: ${RUN_ID}"</span>
 
 <span class="k">while</span> true; <span class="k">do</span>
-  <span class="k">if</span> [[ <span class="s">"$CAP_ENABLED"</span> == true &amp;&amp; <span class="s">"$ELAPSED"</span> -ge <span class="s">"$MAX_SECONDS"</span> ]]; <span class="k">then</span>
-    <span class="fn">echo</span> <span class="s">"[TIMEOUT] Safety cap of ${RAW_MAX_WAIT} minute(s) reached. Marking build FAILED."</span>
+  <span class="k">if</span> [[ <span class="s">"$ELAPSED"</span> -ge <span class="s">"$MAX_SECONDS"</span> ]]; <span class="k">then</span>
+    <span class="k">if</span> [[ <span class="s">"$CAP_MODE"</span> == <span class="s">"absolute-ceiling"</span> ]]; <span class="k">then</span>
+      <span class="fn">echo</span> <span class="s">"[TIMEOUT] Absolute ceiling of ${DISPLAY_MAX_MINUTES} minute(s) reached (MAX_WAIT_MINUTES was set to '${RAW_MAX_WAIT}'). Marking build FAILED."</span>
+    <span class="k">else</span>
+      <span class="fn">echo</span> <span class="s">"[TIMEOUT] Safety cap of ${DISPLAY_MAX_MINUTES} minute(s) reached. Marking build FAILED."</span>
+    <span class="k">fi</span>
     <span class="fn">echo</span> <span class="s">"[TIMEOUT] Testsigma Run ID ${RUN_ID} is left RUNNING -- this script does not stop it on timeout, by design."</span>
     <span class="k">exit</span> 1
   <span class="k">fi</span>
@@ -1182,10 +1281,26 @@ CONSECUTIVE_HTTP_FAILURES=0
   <span class="fn">echo</span> <span class="s">"[INFO] Status: ${STATUS} (elapsed ${ELAPSED}s)"</span>
 
   <span class="k">case</span> <span class="s">"$STATUS"</span> <span class="k">in</span>
-    PASSED|FAILED|STOPPED|ERROR|ABORTED)
+    PASSED|FAILED|FAILURE|STOPPED|ERROR|ABORTED)
       <span class="fn">echo</span> <span class="s">"[DONE] Terminal status reached: ${STATUS}"</span>
       <span class="k">exit</span> 0 ;;
   <span class="k">esac</span>
+
+  <span class="c"># Fail-safe: Testsigma's result vocabulary isn't fully documented, and it has
+  # already been observed to diverge from what this list assumed (FAILURE vs
+  # FAILED). If the same unrecognized, non-"in-progress" value shows up on two
+  # consecutive polls, treat it as terminal and fail safe instead of polling
+  # for hours (or, unbounded, forever) on a status this script doesn't know.</span>
+  STATUS_LC=$(<span class="fn">echo</span> <span class="s">"$STATUS"</span> | <span class="fn">tr</span> '[:upper:]' '[:lower:]')
+  <span class="k">if</span> [[ -n <span class="s">"$STATUS"</span> &amp;&amp; <span class="s">"$IN_PROGRESS_STATUSES"</span> != *<span class="s">" ${STATUS_LC} "</span>* ]]; <span class="k">then</span>
+    <span class="k">if</span> [[ <span class="s">"$STATUS_LC"</span> == <span class="s">"$LAST_UNRECOGNIZED_LC"</span> ]]; <span class="k">then</span>
+      <span class="fn">echo</span> <span class="s">"[WARN] Unrecognized status '${STATUS}' seen on two consecutive polls -- treating as terminal (failing safe) rather than waiting for a timeout. Please report this status value so it can be added to the known list."</span>
+      <span class="k">exit</span> 1
+    <span class="k">fi</span>
+    LAST_UNRECOGNIZED_LC="$STATUS_LC"
+  <span class="k">else</span>
+    LAST_UNRECOGNIZED_LC=""
+  <span class="k">fi</span>
 
   <span class="fn">sleep</span> <span class="s">"$POLL_INTERVAL"</span>
   ELAPSED=$(( ELAPSED + POLL_INTERVAL ))
@@ -1197,6 +1312,10 @@ CONSECUTIVE_HTTP_FAILURES=0
           <p>Save as <code>poll-status.ps1</code>, same folder:</p>
           <pre><span class="c"># -------------------------------------------------------------
 # poll-status.ps1 -- see poll-status.sh header for parameter docs.
+# Even when the normal cap is disabled ("unbounded"/"none"/0), an
+# absolute ceiling (ABSOLUTE_MAX_WAIT_MINUTES, default 1440 = 24h)
+# still applies. Also fails safe if Testsigma returns a result value
+# outside the known terminal list on two consecutive polls.
 # -------------------------------------------------------------</span>
 $ErrorActionPreference = <span class="s">"Continue"</span>
 
@@ -1207,24 +1326,34 @@ $runId = (Get-Content $runIdFile -Raw).Trim()
 
 $rawMaxWait = <span class="k">if</span> ($env:MAX_WAIT_MINUTES) { $env:MAX_WAIT_MINUTES } <span class="k">else</span> { <span class="s">"240"</span> }
 $rawMaxWaitLc = $rawMaxWait.ToLower()
+$absoluteMaxMinutes = <span class="k">if</span> ($env:ABSOLUTE_MAX_WAIT_MINUTES) { [int]$env:ABSOLUTE_MAX_WAIT_MINUTES } <span class="k">else</span> { 1440 }
 <span class="k">if</span> ($rawMaxWaitLc <span class="k">-in</span> @(<span class="s">"0"</span>, <span class="s">"unbounded"</span>, <span class="s">"none"</span>, <span class="s">""</span>)) {
-  $capEnabled = $false; $maxSeconds = 0
-  Write-Host <span class="s">"[INFO] MAX_WAIT_MINUTES='$rawMaxWait' -&gt; safety cap DISABLED."</span>
+  $capMode = <span class="s">"absolute-ceiling"</span>; $maxSeconds = $absoluteMaxMinutes * 60; $displayMaxMinutes = $absoluteMaxMinutes
+  Write-Host <span class="s">"[INFO] MAX_WAIT_MINUTES='$rawMaxWait' -&gt; normal safety cap disabled. Polling until terminal status, backstopped by an absolute ceiling of $absoluteMaxMinutes minute(s) (override via ABSOLUTE_MAX_WAIT_MINUTES)."</span>
 } <span class="k">else</span> {
   <span class="k">if</span> ($rawMaxWait <span class="k">-notmatch</span> <span class="s">'^[0-9]+$'</span>) { Write-Host <span class="s">"[ERROR] MAX_WAIT_MINUTES must be an integer, 'unbounded', or 'none'."</span>; <span class="k">exit</span> 1 }
-  $capEnabled = $true; $maxSeconds = [int]$rawMaxWait * 60
+  $capMode = <span class="s">"normal"</span>; $maxSeconds = [int]$rawMaxWait * 60; $displayMaxMinutes = $rawMaxWait
   Write-Host <span class="s">"[INFO] MAX_WAIT_MINUTES='$rawMaxWait' -&gt; safety cap ENABLED at ${maxSeconds}s."</span>
 }
+
+<span class="c"># Statuses treated as "still in progress" -- excluded from the
+# unrecognized-status fail-safe below.</span>
+$inProgressStatuses = @(<span class="s">"running"</span>,<span class="s">"pending"</span>,<span class="s">"queued"</span>,<span class="s">"in_progress"</span>,<span class="s">"inprogress"</span>,<span class="s">"scheduled"</span>,<span class="s">"initiated"</span>,<span class="s">"started"</span>,<span class="s">"waiting"</span>,<span class="s">"not_started"</span>,<span class="s">"notstarted"</span>)
 
 $pollInterval = <span class="k">if</span> ($env:POLL_INTERVAL_SECONDS) { [int]$env:POLL_INTERVAL_SECONDS } <span class="k">else</span> { 30 }
 $maxHttpFailures = <span class="k">if</span> ($env:MAX_CONSECUTIVE_HTTP_FAILURES) { [int]$env:MAX_CONSECUTIVE_HTTP_FAILURES } <span class="k">else</span> { 10 }
 $elapsed = 0
 $consecutiveFailures = 0
+$lastUnrecognizedLc = <span class="s">""</span>
 Write-Host <span class="s">"[INFO] Polling Testsigma for Run ID: $runId"</span>
 
 <span class="k">while</span> ($true) {
-  <span class="k">if</span> ($capEnabled -and $elapsed -ge $maxSeconds) {
-    Write-Host <span class="s">"[TIMEOUT] Safety cap of $rawMaxWait minute(s) reached. Failing the build."</span>
+  <span class="k">if</span> ($elapsed -ge $maxSeconds) {
+    <span class="k">if</span> ($capMode -eq <span class="s">"absolute-ceiling"</span>) {
+      Write-Host <span class="s">"[TIMEOUT] Absolute ceiling of $displayMaxMinutes minute(s) reached (MAX_WAIT_MINUTES was set to '$rawMaxWait'). Failing the build."</span>
+    } <span class="k">else</span> {
+      Write-Host <span class="s">"[TIMEOUT] Safety cap of $displayMaxMinutes minute(s) reached. Failing the build."</span>
+    }
     <span class="k">exit</span> 1
   }
   <span class="k">try</span> {
@@ -1233,8 +1362,20 @@ Write-Host <span class="s">"[INFO] Polling Testsigma for Run ID: $runId"</span>
     $consecutiveFailures = 0
     $status = $resp.result
     Write-Host <span class="s">"[INFO] Status: $status (elapsed ${elapsed}s)"</span>
-    <span class="k">if</span> ($status <span class="k">-in</span> @(<span class="s">"PASSED"</span>,<span class="s">"FAILED"</span>,<span class="s">"STOPPED"</span>,<span class="s">"ERROR"</span>,<span class="s">"ABORTED"</span>)) {
+    <span class="k">if</span> ($status <span class="k">-in</span> @(<span class="s">"PASSED"</span>,<span class="s">"FAILED"</span>,<span class="s">"FAILURE"</span>,<span class="s">"STOPPED"</span>,<span class="s">"ERROR"</span>,<span class="s">"ABORTED"</span>)) {
       Write-Host <span class="s">"[DONE] Terminal status reached: $status"</span>; <span class="k">exit</span> 0
+    }
+    <span class="c"># Fail-safe: same unrecognized non-"in-progress" value on two
+    # consecutive polls is treated as terminal rather than waited out.</span>
+    $statusLc = <span class="k">if</span> ($status) { $status.ToString().ToLower() } <span class="k">else</span> { <span class="s">""</span> }
+    <span class="k">if</span> ($statusLc -and ($inProgressStatuses -notcontains $statusLc)) {
+      <span class="k">if</span> ($statusLc -eq $lastUnrecognizedLc) {
+        Write-Host <span class="s">"[WARN] Unrecognized status '$status' seen on two consecutive polls -- treating as terminal (failing safe) rather than waiting for a timeout. Please report this status value so it can be added to the known list."</span>
+        <span class="k">exit</span> 1
+      }
+      $lastUnrecognizedLc = $statusLc
+    } <span class="k">else</span> {
+      $lastUnrecognizedLc = <span class="s">""</span>
     }
   } <span class="k">catch</span> {
     $consecutiveFailures++
@@ -1285,7 +1426,7 @@ ts_get() {
   <span class="c"># $1 url, $2 out file -- returns 0 ok, 1 http failure</span>
   local code
   code=$(<span class="fn">curl</span> -s -o <span class="s">"$2"</span> -w <span class="s">"%{http_code}"</span> -H <span class="s">"Authorization: Bearer ${TS_API_TOKEN}"</span> -H <span class="s">"Accept: application/json"</span> <span class="s">"$1"</span>)
-  <span class="k">if</span> [[ <span class="s">"$code"</span> != <span class="s">"200"</span> ]]; <span class="k">then</span> <span class="fn">echo</span> <span class="s">"[ERROR] GET ${1} -&gt; HTTP ${code}"</span>; <span class="k">return</span> 1; <span class="k">fi</span>
+  <span class="k">if</span> [[ <span class="s">"$code"</span> != <span class="s">"200"</span> ]]; <span class="k">then</span> <span class="fn">echo</span> <span class="s">"[ERROR] GET ${1} -&gt; HTTP ${code}"</span> &gt;&amp;2; <span class="k">return</span> 1; <span class="k">fi</span>
   <span class="k">return</span> 0
 }
 
@@ -1638,13 +1779,30 @@ def fetchAndGenerateReport() {
         def runId = sh(script: <span class="s">'cat "${RUN_ID_FILE}" 2&gt;/dev/null || true'</span>, returnStdout: true).trim()
         <span class="k">if</span> (runId) {
           echo <span class="s">"[ABORT] Stopping Testsigma Run ID: ${runId}"</span>
+          def stopStatus
           withEnv([<span class="s">"TS_RUN_ID=${runId}"</span>]) {
-            sh <span class="s">'''
-              curl -s -X PUT -H "Authorization: Bearer ${TS_API_TOKEN}" -H "Content-Type: application/json" \\
-                "https://app.testsigma.com/api/v1/execution_results/${TS_RUN_ID}" -d "{\\"result\\":\\"STOPPED\\"}" || echo "[WARN] Stop request failed"
-            '''</span>
+            stopStatus = sh(script: <span class="s">'''
+              TMPFILE=$(mktemp)
+              HTTP_CODE=$(curl -s -o "$TMPFILE" -w "%{http_code}" -X PUT \\
+                -H "Authorization: Bearer ${TS_API_TOKEN}" \\
+                -H "Content-Type: application/json" \\
+                "https://app.testsigma.com/api/v1/execution_results/${TS_RUN_ID}" \\
+                -d "{\\"result\\":\\"STOPPED\\"}")
+              BODY=$(cat "$TMPFILE"); rm -f "$TMPFILE"
+              if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "201" ]]; then
+                echo "[OK] Testsigma acknowledged the stop request (HTTP ${HTTP_CODE})."
+                exit 0
+              else
+                echo "[ERROR] Stop request rejected by Testsigma (HTTP ${HTTP_CODE}): ${BODY}"
+                exit 1
+              fi
+            '''</span>, returnStatus: true)
           }
-          echo <span class="s">"[ABORT] Stop signal sent. Testsigma license freed."</span>
+          <span class="k">if</span> (stopStatus == 0) {
+            echo <span class="s">"[ABORT] Stop signal sent. Testsigma license freed."</span>
+          } <span class="k">else</span> {
+            echo <span class="s">"[ABORT] WARNING: Testsigma did not confirm the stop (see HTTP error above). The run may still be RUNNING and consuming a license seat -- check Testsigma UI."</span>
+          }
         } <span class="k">else</span> {
           echo <span class="s">"[ABORT] No Run ID found -- Testsigma may not have started."</span>
         }
@@ -1775,6 +1933,7 @@ def fetchAndGenerateReport() {
         <table class="data-table">
           <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
           <tbody>
+            <tr class="mac-only"><td><code>fetch-report.sh: Permission denied</code> or <code>generate-html-report.sh: Permission denied</code></td><td>Mac only — this tier introduces these two scripts after the only <code>chmod +x</code> reminder in the guide (Tier 1's troubleshooting table, which only covers <code>trigger-run.sh</code>). It's easy to save all the files here and skip making the new ones executable.</td><td>Run <code>chmod +x fetch-report.sh generate-html-report.sh</code> in <code>jenkins-ts-scripts/</code> (<code>generate-html-report.py</code> is invoked via <code>python3</code>, so it doesn't need the executable bit), then re-run <code>ls -la</code> to confirm.</td></tr>
             <tr><td>Report artifact missing</td><td><code>generate-html-report</code> failed silently, or <code>REPORT_DIR</code> mismatch</td><td>Check Console Output for a Python traceback; confirm <code>REPORT_DIR</code> is identical everywhere it's referenced.</td></tr>
             <tr><td>Abort doesn't stop Testsigma</td><td><code>RUN_ID_FILE</code> path isn't stable across stages</td><td>Confirm it's a fixed path outside the workspace, unchanged between stages.</td></tr>
             <tr><td>"powershell step not found"</td><td>PowerShell plugin missing</td><td>Install via <strong>Manage Jenkins → Plugins</strong>.</td></tr>
