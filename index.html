@@ -1535,6 +1535,11 @@ if [[ -z "${TS_API_TOKEN:-}" ]]; then echo "[ERROR] TS_API_TOKEN is not set."; e
 if [[ ! -f "$RUN_ID_FILE" ]]; then echo "[ERROR] Run ID file not found at ${RUN_ID_FILE}."; exit 1; fi
 RUN_ID=$(cat "$RUN_ID_FILE")
 REPORT_DIR="${REPORT_DIR:-./ts-reports}"
+<span class="c"># Wiped and recreated on every run -- REPORT_DIR is meant to hold exactly</span>
+<span class="c"># one run's data. On a recurring job (Jenkins workspaces persist across</span>
+<span class="c"># builds by default), leaving old files in place means every past run's</span>
+<span class="c"># Suite/Case/Step JSON accumulates here and bleeds into future reports.</span>
+rm -rf "$REPORT_DIR"
 mkdir -p "$REPORT_DIR"
 FAILURES=0
 
@@ -1715,6 +1720,8 @@ if (-not $env:TS_API_TOKEN) { Write-Host "[ERROR] TS_API_TOKEN is not set."; exi
 if (-not (Test-Path $env:RUN_ID_FILE)) { Write-Host "[ERROR] Run ID file not found at $($env:RUN_ID_FILE)."; exit 1 }
 $runId = (Get-Content $env:RUN_ID_FILE -Raw).Trim()
 $reportDir = if ($env:REPORT_DIR) { $env:REPORT_DIR } else { ".\ts-reports" }
+<span class="c"># Wiped and recreated on every run -- see fetch-report.sh for why.</span>
+if (Test-Path $reportDir) { Remove-Item -Recurse -Force $reportDir }
 New-Item -ItemType Directory -Force -Path $reportDir | Out-Null
 $pacing = if ($env:PACING_SECONDS) { [int]$env:PACING_SECONDS } else { 1 }
 $levelsRaw = if ($env:TS_REPORT_LEVELS) { $env:TS_REPORT_LEVELS } else { "SUITE,CASE,STEP" }
@@ -1853,9 +1860,11 @@ exit $(if ($failures -gt 0) { 1 } else { 0 })</pre>
       <pre><span class="c">#!/usr/bin/env python3</span>
 <span class="c"># -------------------------------------------------------------</span>
 <span class="c"># generate-html-report.py</span>
-<span class="c"># Reads every *_plan.json / *_suite_*.json / *_case_*.json /</span>
-<span class="c"># *_step_*.json / *_suitename_*.json / *_casename_*.json in</span>
-<span class="c"># REPORT_DIR and renders one self-contained, offline-readable</span>
+<span class="c"># Reads this run's own *_plan.json / *_suite_*.json / *_case_*.json /</span>
+<span class="c"># *_step_*.json / *_suitename_*.json / *_casename_*.json in REPORT_DIR</span>
+<span class="c"># (scoped to RUN_ID_FILE's contents, so a recurring job whose</span>
+<span class="c"># REPORT_DIR accumulates past runs' files doesn't pull them into</span>
+<span class="c"># today's report) and renders one self-contained, offline-readable</span>
 <span class="c"># HTML dashboard: ts-report.html in the same folder. No JS</span>
 <span class="c"># framework, no external assets.</span>
 <span class="c">#</span>
@@ -1875,11 +1884,33 @@ exit $(if ($failures -gt 0) { 1 } else { 0 })</pre>
 import json, os, glob, html, sys
 
 report_dir = os.environ.get("REPORT_DIR", "./ts-reports")
+run_id_file = os.environ.get("RUN_ID_FILE", "/tmp/ts_run_id_manual-run")
 
 
-def load(pattern):
+def load_run_id():
+    try:
+        with open(run_id_file) as f:
+            return f.read().strip()
+    except OSError as e:
+        print(f"[WARN] Could not read RUN_ID_FILE ({run_id_file}): {e}. "
+              f"Falling back to matching ANY run's files in REPORT_DIR, "
+              f"which may mix in results from other runs.", file=sys.stderr)
+        return None
+
+
+run_id = load_run_id()
+
+
+def load(suffix):
+<span class="c">    # REPORT_DIR accumulates one set of files per run (trigger-run.sh's</span>
+<span class="c">    # RUN_ID makes every filename unique, so nothing gets overwritten) --</span>
+<span class="c">    # without this, a recurring job would silently pull in every past</span>
+<span class="c">    # run's Suite/Case/Step/Plan files into today's report. When the</span>
+<span class="c">    # RUN_ID is known, scope strictly to it; only fall back to matching</span>
+<span class="c">    # any run (old, broader behavior) if RUN_ID_FILE itself is unreadable.</span>
+    glob_pattern = f"{run_id}{suffix}" if run_id else f"*{suffix}"
     out = []
-    for path in sorted(glob.glob(os.path.join(report_dir, pattern))):
+    for path in sorted(glob.glob(os.path.join(report_dir, glob_pattern))):
         try:
             with open(path) as f:
                 out.append((path, json.load(f)))
@@ -1888,12 +1919,12 @@ def load(pattern):
     return out
 
 
-plan_files = load("*_plan.json")
-suite_files = load("*_suite_*.json")
-case_files = load("*_case_*.json")
-step_files = load("*_step_*.json")
-suitename_files = load("*_suitename_*.json")
-casename_files = load("*_casename_*.json")
+plan_files = load("_plan.json")
+suite_files = load("_suite_*.json")
+case_files = load("_case_*.json")
+step_files = load("_step_*.json")
+suitename_files = load("_suitename_*.json")
+casename_files = load("_casename_*.json")
 
 
 def esc(v):
